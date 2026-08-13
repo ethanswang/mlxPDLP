@@ -51,3 +51,4 @@ Testing/
 
 __pycache__/
 *.pyc
+/benchmarks/data/netlib/sources/
