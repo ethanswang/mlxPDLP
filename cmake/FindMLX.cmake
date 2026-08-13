@@ -47,7 +47,13 @@ if(MLX_SOURCE_DIR)
     list(APPEND _MLX_SOURCE_HINTS "${MLX_SOURCE_DIR}")
 endif()
 if(MLX_BUILD_DIR)
-    list(APPEND _MLX_SOURCE_HINTS "${MLX_BUILD_DIR}/..")
+    # Cover both common layouts: in-tree (<source>/build) and sibling
+    # (<workspace>/_deps/mlx alongside <workspace>/_deps/mlx-build).
+    list(APPEND _MLX_SOURCE_HINTS
+        "${MLX_BUILD_DIR}/.."
+        "${MLX_BUILD_DIR}/../mlx"
+        "${MLX_BUILD_DIR}/../mlx-src"
+    )
     list(APPEND _MLX_BUILD_HINTS "${MLX_BUILD_DIR}")
 endif()
 

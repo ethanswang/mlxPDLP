@@ -45,6 +45,7 @@ jobs:
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
+          -DMLX_SOURCE_DIR=${{ github.workspace }}/_deps/mlx
           -DMLX_BUILD_DIR=${{ github.workspace }}/_deps/mlx-build
 
       - name: Build mlxPDLP

@@ -11,5 +11,5 @@ from Netlib's compact MPS representation with Netlib's `emps.c` utility.
   `fec81e24fa91bc545d97239b108b43e6034f37b4bf2455a3f8c179726b44d44c`
 
 The objective row is included in Netlib's published row/nonzero counts. The
-The mlxPDLP parser exposes 56 constraints and excludes objective coefficients from
+mlxPDLP parser exposes 56 constraints and excludes objective coefficients from
 the constraint-matrix nonzero count.
