@@ -252,6 +252,9 @@ if(BUILD_TESTING)
             )
             mlxpdlp_enable_warnings(mlxpdlp_presolve_postsolve_test)
             add_test(NAME presolve_postsolve COMMAND mlxpdlp_presolve_postsolve_test)
+            set_tests_properties(presolve_postsolve
+                PROPERTIES SKIP_RETURN_CODE 77
+            )
         endif()
 
         add_executable(mlxpdlp_mps_device_comparison
