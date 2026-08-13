@@ -1,0 +1,41 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "mlxpdlp"
+version = "0.1.0"
+description = "Python bindings for mlxPDLP, a first-order LP solver on Apple MLX CPU and Metal"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.21"]
+authors = [
+    { name = "Ethan Wang", email = "ethanshurui.wang@gmail.com" },
+]
+keywords = ["linear-programming", "lp", "pdlp", "metal", "mlx", "optimization"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/mlxPDLP/mlxPDLP"
+Documentation = "https://github.com/mlxPDLP/mlxPDLP/tree/main/docs"
+
+[tool.scikit-build]
+minimum-version = "0.10"
+wheel.packages = ["mlxpdlp"]
+wheel.install-dir = "mlxpdlp"
+cmake.build-type = "Release"
+sdist.include = ["src/*.cpp", "CMakeLists.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

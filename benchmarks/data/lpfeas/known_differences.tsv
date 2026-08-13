@@ -1,0 +1,4 @@
+name	source_constraint_rows	source_columns	source_matrix_nonzeros	note
+dlr1	1735470	9142907	18365107	ASU source has 21,000 more columns than the LPfeas table
+support10	165684	14770	555082	ASU source has 3,930 more constraint-matrix entries than the LPfeas table
+tpl-tub-ws16	1154615	747601	4720567	ASU source has 90 fewer columns than the LPfeas table

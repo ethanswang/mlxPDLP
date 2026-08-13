@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS build, test, and package (CPU + Metal)
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out mlxPDLP
+        uses: actions/checkout@v6
+
+      - name: Check out tested MLX revision
+        uses: actions/checkout@v6
+        with:
+          repository: ml-explore/mlx
+          ref: 25616a0a6acf78a6e23379a0ffcdc3296775a468
+          path: _deps/mlx
+
+      - name: Configure MLX with Metal enabled
+        run: >
+          cmake -S _deps/mlx -B _deps/mlx-build
+          -DCMAKE_BUILD_TYPE=Release
+          -DMLX_BUILD_METAL=ON
+          -DMLX_BUILD_TESTS=OFF
+          -DMLX_BUILD_EXAMPLES=OFF
+          -DMLX_BUILD_BENCHMARKS=OFF
+          -DMLX_BUILD_PYTHON_BINDINGS=OFF
+
+      - name: Build MLX
+        run: cmake --build _deps/mlx-build --parallel 3
+
+      - name: Configure mlxPDLP
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DMLX_BUILD_DIR=${{ github.workspace }}/_deps/mlx-build
+
+      - name: Build mlxPDLP
+        run: cmake --build build --parallel 3
+
+      - name: Test mlxPDLP
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Install mlxPDLP
+        run: cmake --install build --prefix "${{ runner.temp }}/mlxpdlp-install"
+
+      - name: Configure installed-package consumer
+        run: >
+          cmake
+          -S examples/installed_consumer
+          -B consumer-build
+          -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mlxpdlp-install
+          -DMLX_BUILD_DIR=${{ github.workspace }}/_deps/mlx-build
+
+      - name: Build and run installed-package consumer
+        run: |
+          cmake --build consumer-build --parallel 3
+          ./consumer-build/mlxpdlp_installed_consumer

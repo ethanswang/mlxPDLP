@@ -1,0 +1,84 @@
+# LPfeas public benchmark data
+
+This directory contains the 49 publicly disclosed instances from Hans
+Mittelmann's LPfeas benchmark dated 2026-07-20. The benchmark lists 65
+instances, but its final 16 are undisclosed.
+
+`manifest.tsv` records the published dimensions, source representation, and
+download URL. Run:
+
+```sh
+bash benchmarks/data/lpfeas/download.sh
+bash benchmarks/data/lpfeas/verify.sh
+```
+
+The downloader preserves source archives under `sources/` and streams
+conversion to runnable `.mps.gz` files. Sources ending in `.mps.bz2` contain
+ordinary MPS; sources without the `.mps` suffix use the Netlib compressed-MPS
+encoding and are expanded with EMPS. Plain MPS is never materialized because
+some instances contain tens of millions of nonzeros.
+
+`verify.sh` checks each file with mlxPDLP's MPS parser. The published table
+mixes dimension conventions independently: a row count may include the
+objective row, and a nonzero count may include the objective coefficients.
+`dimensions.tsv` records both parts and accepts those conventions.
+
+`online_gpu_reference.csv` transcribes the four GPU columns from the
+2026-07-20 [LPfeas table](https://plato.asu.edu/ftp/lpfeas.html) for the 49
+public rows. Whole-second values and the source table's `t`, `f`, and `m`
+status markers are preserved verbatim for `compare_lpfeas.py`.
+
+The current source archives for `dlr1`, `support10`, and `tpl-tub-ws16` have
+dimensions that differ from the benchmark table. A separate streaming scan of
+their raw MPS sections confirms the parser's counts. The confirmed differences
+are allowlisted in `known_differences.tsv` rather than changing the published
+dimensions in `manifest.tsv`.
+
+Run the LPfeas protocol benchmark with practical fp32 tolerance `1e-4` and independent
+float64 original-model audit metrics:
+
+```sh
+./build/mlxpdlp_lpfeas_benchmark \
+  --instance qap15 \
+  --output-prefix benchmarks/results/qap15-metal
+```
+
+Omit `--instance` to run all 49 public rows. See
+[`benchmarks/README.md`](../../README.md) for the exact protocol, report
+semantics, and online B200 comparison command.
+
+## Current practical-accuracy bridge
+
+On 2026-08-08, the four smallest progression cases selected for the renewed
+LPFeas pass verified at `1e-4` on both backends. Runs used a `5e-5` internal
+target, bounded host-double correction, and the audited retry portfolio.
+
+| Instance | MLX/Metal | Sparse CPU | Max audited KKT, Metal | Max audited KKT, CPU |
+|---|---:|---:|---:|---:|
+| `nug08-3rd` | 0.86 s, `OPTIMAL` | 0.70 s, `OPTIMAL` | `1.002e-7` | `9.919e-8` |
+| `qap15` | 4.87 s, `OPTIMAL` | 3.89 s, `OPTIMAL` | `9.928e-7` | `9.920e-7` |
+| `fome13` | 15.49 s, `OPTIMAL` | 15.98 s, `OPTIMAL` | `8.314e-7` | `8.806e-7` |
+| `cont1` | 508.89 s, audited at time limit | 426.95 s, audited at iteration limit | `7.100e-5` | `7.691e-5` |
+
+`cont1` meets the requested external audit even though it does not cross the
+stricter `5e-5` internal stopping target. `Linf_520c` remains intentionally
+retired after its requested final attempt, and `psched3-3` remains deferred at
+the documented PSLP postsolve-certificate boundary while this smaller bridge
+is expanded.
+
+Run a fixed-work Metal benchmark with:
+
+```sh
+./build/mlxpdlp_mps_benchmark \
+  benchmarks/data/lpfeas/qap15.mps.gz \
+  50000 100 metal
+```
+
+Sources:
+
+- <https://plato.asu.edu/ftp/lpfeas.html>
+- <https://plato.asu.edu/ftp/lptestset/>
+- <https://miplib.zib.de/>
+- <https://miplib2010.zib.de/>
+- <https://old.sztaki.hu/~meszaros/public_ftp/lptestset/>
+- <https://www.netlib.org/lp/data/emps.c>

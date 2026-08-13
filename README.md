@@ -1,0 +1,391 @@
+# mlxPDLP
+
+`mlxPDLP` is a standalone C++ implementation of the Primal-Dual Hybrid
+Gradient algorithm for linear programming, powered by
+[Apple MLX](https://github.com/ml-explore/mlx).
+
+It runs the same PDHG algorithm on MLX CPU or Metal GPU devices,
+accepts CSR linear programs through a small C++ API, and includes an optional
+PSLP presolver and MPS loader. It has no build or runtime dependency on CUDA
+or the original cuPDLPx source tree.
+
+> [!IMPORTANT]
+> Sparse Metal solves remain in CSR form through Ruiz/Pock-Chambolle
+> preprocessing, the power method, and PDHG iteration; they never allocate
+> dense `A` or `Aᵀ`. On macOS, sufficiently large sparse CPU problems use an
+> Accelerate SpMV primitive for the same reason. Small or dense problems retain
+> the dense MLX path.
+>
+> CPU execution is deliberately FP64 throughout the numerical solve. Metal
+> remains FP32 because Apple Silicon GPUs do not expose FP64 arithmetic.
+> This makes CPU the higher-accuracy fallback while preserving Metal's
+> throughput advantage — and it caps the portable Metal accuracy at the
+> practical `1e-4` tolerance (`5e-5` internal target).
+
+## Features
+
+- Explicit MLX CPU and GPU device selection
+- Metal execution when MLX is built with `MLX_BUILD_METAL=ON`
+- CSR Metal matrix-vector products with a stored sparse transpose
+- Accelerate sparse CPU matrix-vector products for large CSR models
+- Halpern PDHG with adaptive restart and primal-weight control
+- Ruiz, Pock-Chambolle, and bound/objective preconditioning
+- Optional PSLP presolve, early termination, and solution postsolve
+- Primal and dual warm starts in original problem coordinates
+- Public `double` API with FP64 CPU and FP32 Metal numerical backends
+- Python bindings (nanobind) with NumPy CSR input and MPS helpers
+- Plain and gzip-compressed MPS loading
+- CMake install and `find_package(mlxPDLP)` support
+- Analytic CPU/GPU tests plus an opt-in 40-case Netlib regression suite
+
+## Requirements
+
+- CMake 3.25 or newer
+- A C++20 compiler
+- A separately built MLX C++ library
+- PSLP 0.0.8 when `MLXPDLP_BUILD_PRESOLVE=ON` (found or fetched by CMake)
+- Zlib when `MLXPDLP_BUILD_MPS=ON`
+- macOS and Apple Silicon for the Metal path
+
+Build MLX with Metal enabled:
+
+```sh
+cmake -S /path/to/mlx -B /path/to/mlx/build \
+  -DMLX_BUILD_METAL=ON \
+  -DMLX_BUILD_TESTS=OFF \
+  -DMLX_BUILD_EXAMPLES=OFF
+cmake --build /path/to/mlx/build --parallel
+```
+
+## Quick start
+
+From the mlxPDLP repository root:
+
+```sh
+cmake -S . -B build \
+  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+`MLX_BUILD_DIR` should contain `libmlx`. Its parent is searched for MLX
+headers. Separate layouts can specify:
+
+```sh
+cmake -S . -B build \
+  -DMLX_SOURCE_DIR=/absolute/path/to/mlx \
+  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build
+```
+
+The GPU tests use CTest skip code 77 when MLX exposes no GPU device.
+
+### Build options
+
+| Option | Default | Purpose |
+|---|---:|---|
+| `BUILD_TESTING` | `ON` | Build the regression and device tests |
+| `MLXPDLP_BUILD_PRESOLVE` | `ON` | Build PSLP 0.0.8 presolve/postsolve support |
+| `MLXPDLP_BUILD_MPS` | `ON` | Build the bundled MPS loader |
+| `MLXPDLP_BUILD_EXAMPLES` | `ON` | Build the basic example |
+| `MLXPDLP_BUILD_BENCHMARKS` | `OFF` | Build fixed-work and LPfeas Metal benchmarks |
+| `MLXPDLP_ENABLE_NETLIB_REGRESSION` | `OFF` | Register the downloaded 40-case Netlib CPU/Metal regression suite |
+| `MLXPDLP_ENABLE_WARNINGS` | `ON` | Enable common compiler warnings |
+
+For a minimal solver-only library:
+
+```sh
+cmake -S . -B build-minimal \
+  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build \
+  -DBUILD_TESTING=OFF \
+  -DMLXPDLP_BUILD_PRESOLVE=OFF \
+  -DMLXPDLP_BUILD_MPS=OFF \
+  -DMLXPDLP_BUILD_EXAMPLES=OFF
+cmake --build build-minimal --parallel
+```
+
+## Python bindings
+
+`mlxpdlp` exposes the solver to Python (NumPy CSR input, MPS loading,
+PSLP presolve, warm starts, CPU float64 / Metal float32 device
+selection):
+
+```sh
+MLX_BUILD_DIR=/absolute/path/to/mlx/build pip install ./python
+```
+
+```python
+import mlxpdlp
+import numpy as np
+
+solver = mlxpdlp.Solver(2, 1,
+    np.array([0, 2], dtype=np.int32), np.array([0, 1], dtype=np.int32),
+    np.array([1.0, 1.0]), np.zeros(2), np.full(2, np.inf),
+    np.array([-np.inf]), np.array([1.0]), np.array([-1.0, -1.0]),
+    device="gpu" if mlxpdlp.has_gpu() else "cpu")
+result = solver.solve()
+print(result.primal_solution, result.primal_objective_value)
+```
+
+See [python/README.md](python/README.md) and
+[docs/python.md](docs/python.md) for the full reference, including the
+small Netlib regression that runs through the Python binding.
+
+## C++ API
+
+The solver handles minimization problems:
+
+```text
+minimize    cᵀx + constant
+subject to  constraint_lb ≤ A x ≤ constraint_ub
+            variable_lb   ≤ x   ≤ variable_ub
+```
+
+```cpp
+#include <mlxPDLP/solver.h>
+
+using namespace mlxpdlp;
+
+pdhg_parameters_t parameters;
+mlxpdlp_set_default_parameters(&parameters);
+parameters.verbose = false;
+
+MlxPdlpSolver solver(
+    num_variables,
+    num_constraints,
+    csr_row_ptr,
+    csr_col_indices,
+    csr_values,
+    variable_lower_bounds,
+    variable_upper_bounds,
+    constraint_lower_bounds,
+    constraint_upper_bounds,
+    objective,
+    objective_constant,
+    &parameters,
+    mx::Device::gpu);  // or mx::Device::cpu
+
+mlxpdlp_result_t *result = solver.solve();
+// Read result->primal_solution, result->primal_objective_value, ...
+mlxpdlp_result_free(result);
+```
+
+Null lower-bound pointers represent `-∞`; null upper-bound pointers represent
+`+∞`. The constructor validates CSR row pointers, nonzero storage, and column
+indices; direct API callers remain responsible for compatible vector lengths.
+
+The overload with `primal_start` and `dual_start` accepts either pointer as
+null. Non-null starts must contain finite values in the original, unscaled
+problem coordinates:
+
+```cpp
+MlxPdlpSolver solver(
+    num_variables, num_constraints,
+    csr_row_ptr, csr_col_indices, csr_values,
+    variable_lower_bounds, variable_upper_bounds,
+    constraint_lower_bounds, constraint_upper_bounds,
+    objective, objective_constant, &parameters,
+    primal_start, dual_start, mx::Device::cpu);
+```
+
+PSLP presolve is enabled by the default parameters when presolve support was
+built. Set `parameters.presolve = false` to use warm starts or to run the
+original problem unchanged. Combining warm starts with presolve currently
+throws `std::invalid_argument`, because PSLP does not expose a mapping for
+initial iterates.
+
+`parameters.presolve_primal_propagation` is off by default. PSLP's aggressive
+propagation can substantially reduce structured models, but its inverse map
+may amplify an approximate dual certificate (especially on FP32 Metal). The LPFeas runner may try
+it as an audit-guarded portfolio stage; direct API users must opt in.
+
+## MPS loading
+
+```cpp
+#include <mlxPDLP/mps_loader.h>
+
+mlxpdlp_mps_problem_t *problem =
+    mlxpdlp_mps_problem_load("model.mps");
+if (!problem) {
+    // Parse or I/O failure.
+}
+
+// Construct MlxPdlpSolver from the exposed CSR arrays and bounds.
+
+mlxpdlp_mps_problem_free(problem);
+```
+
+The core solver minimizes. Callers loading a maximize MPS model should negate
+the objective before solving and restore its sign when reporting. See
+[`tests/test_mps_device_comparison.cpp`](tests/test_mps_device_comparison.cpp).
+
+## Install and consume
+
+```sh
+cmake --install build --prefix /absolute/install/prefix
+```
+
+The installation exports:
+
+- `mlxPDLP::solver`
+- `mlxPDLP::mps` when MPS support is enabled
+
+Downstream CMake:
+
+```cmake
+find_package(mlxPDLP CONFIG REQUIRED)
+target_link_libraries(my_solver PRIVATE mlxPDLP::solver)
+```
+
+Pass `MLX_BUILD_DIR`, `MLX_SOURCE_DIR`, or `MLX_ROOT` when configuring the
+downstream project so the installed package can locate MLX. A complete link
+check is provided in
+[`examples/installed_consumer`](examples/installed_consumer).
+
+## Tests
+
+| CTest name | Coverage |
+|---|---|
+| `mlx_basic` | Basic MLX CPU operations |
+| `solver` | Analytic solver regressions |
+| `device_comparison` | Analytic LP plus duplicate-coordinate sparse regression on CPU and GPU |
+| `mps_device_comparison` | Netlib ADLITTLE on CPU and GPU |
+| `netlib_regression_cpu` | Downloaded 40-case Netlib audit on CPU FP64 (opt-in, long) |
+| `netlib_regression_metal` | Downloaded 40-case Netlib audit on Metal FP32 (opt-in, long) |
+
+The ADLITTLE regression parses 97 variables, 56 constraints, and 383 matrix
+nonzeros, then checks both devices against the published objective
+`225494.96316`.
+
+Timing output is diagnostic. ADLITTLE also verifies that a real sparse LP
+selects the CSR Metal backend; the analytic comparison remains on the dense
+fallback because it is tiny.
+
+## Performance benchmark
+
+### Metal acceleration on Apple Silicon
+
+Fixed-work, equal-iteration head-to-head measurements (presolve off,
+identical PDHG work, cold machine; Apple M3 Max, 16 cores, 64 GB;
+mlxPDLP 0.1.0, 2026-08-12):
+
+| LPfeas instance | Size (rows x cols / nonzeros) | CPU FP64 | Metal FP32 | Speedup |
+|---|---:|---:|---:|---:|
+| `s82` | 87,878 x 1,690,631 / 7.0M | 191.7 s | 53.2 s | **3.6x** |
+| `dlr1` | 1,735,470 x 9,142,907 / 18.4M | 470.3 s | 73.2 s | **6.4x** |
+
+> **Accuracy note:** Apple Silicon GPUs do not expose FP64 arithmetic,
+> so Metal runs in FP32. The practical supported accuracy is therefore a
+> `1e-4` tolerance (independently audited on the original model in
+> FP64), with a `5e-5` internal stopping target. FP32 PDHG is reliable
+> at low-to-moderate accuracy but stagnates on some ill-conditioned
+> models below that scale; use the CPU backend (FP64 throughout) when
+> tighter tolerances are required.
+
+CPU runs the Accelerate sparse FP64 SpMV backend; Metal runs the CSR
+FP32 SpMV backend, so the advantage widens with model size (per
+iteration Metal is 3.6x faster on `s82` and 6.7x faster on `dlr1`,
+with preconditioning overhead negligible on both backends). At the
+same `1e-4` audit, 42 of the 49 public LPfeas instances are verified
+on Metal FP32.
+
+The optional `mlxpdlp_mps_benchmark` executable runs identical fixed PDHG work
+on CPU and Metal; the LPfeas measurements above are its sustained reference
+comparison. The small Netlib PILOT87 model remains the quickly-downloadable
+payload for smoke-testing the executable (Netlib data is otherwise reserved
+for the regression suite). The instances are not distributed with this
+repository; fetch them with the download scripts documented in
+[benchmarks/data](benchmarks/README.md#data):
+
+```sh
+cmake -S . -B build \
+  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build \
+  -DMLXPDLP_BUILD_BENCHMARKS=ON
+cmake --build build --target \
+  mlxpdlp_mps_benchmark mlxpdlp_lpfeas_benchmark \
+  --parallel
+./benchmarks/data/netlib/download.sh
+./build/mlxpdlp_mps_benchmark \
+  benchmarks/data/netlib/pilot87.mps.gz \
+  150000 100 both
+```
+
+For the convergence-based LPfeas runner:
+
+```sh
+./build/mlxpdlp_lpfeas_benchmark \
+  --instance qap15 \
+  --output-prefix benchmarks/results/qap15-metal
+```
+
+The same audited runner supports the 40-instance small-to-medium
+Netlib progression:
+
+```sh
+./benchmarks/data/netlib/download.sh
+./build/mlxpdlp_lpfeas_benchmark \
+  --data benchmarks/data/netlib \
+  --jobs auto \
+  --tolerance 1e-4 \
+  --output-prefix benchmarks/results/netlib-metal \
+  --fail-on-validation
+```
+
+To turn that corpus into a persistent long-running CTest regression:
+
+```sh
+./benchmarks/data/netlib/download.sh
+cmake -S . -B build \
+  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build \
+  -DMLXPDLP_BUILD_BENCHMARKS=ON \
+  -DMLXPDLP_ENABLE_NETLIB_REGRESSION=ON
+cmake --build build --target mlxpdlp_netlib_regression
+```
+
+Netlib `--jobs auto` uses backend-specific concurrency, longest-first queue
+seeding, and dynamic work stealing. LPfeas `auto` remains serial because those
+hard cases are diagnosed one at a time; an explicit `--jobs N` is still
+available for experiments. CPU and Metal regression tests are marked
+`RUN_SERIAL` at the CTest level so their internal worker pools never compete.
+
+See [the benchmark report](benchmarks/README.md) for the full LPfeas protocol,
+float64 audit semantics, online NVIDIA B200 comparison, fixed-work methodology,
+provenance, and the latest measured result.
+
+## Documentation
+
+- [Architecture and PDHG walkthrough](docs/architecture.md)
+- [CPU/Metal performance benchmark](benchmarks/README.md)
+- [Netlib benchmark provenance and audit results](benchmarks/data/netlib/README.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+
+## Project status
+
+mlxPDLP is an early standalone release. The highest-priority engineering work
+is active infeasibility-certificate termination (the ray machinery exists but
+is not yet wired into the iteration loop) and further reducing per-iteration
+device synchronization.
+
+## Attribution
+
+The PDHG implementation is derived from
+[MIT-Lu-Lab/cuPDLPx](https://github.com/MIT-Lu-Lab/cuPDLPx). The bundled MPS
+parser also originated there. mlxPDLP contains the required source locally
+and does not depend on a cuPDLPx checkout.
+
+The Curtis-Reid step-size initialization heuristic follows the approach of
+[PolyU-IOR/HPR-LP-C](https://github.com/PolyU-IOR/HPR-LP-C) (MIT). No code is
+copied from HPR-LP-C; the reference is an algorithmic acknowledgment.
+
+Optional presolve and postsolve use
+[PSLP 0.0.8](https://github.com/dance858/PSLP), also licensed under
+Apache-2.0.
+
+## Authors
+
+- Ethan Wang <ethanshurui.wang@gmail.com>
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

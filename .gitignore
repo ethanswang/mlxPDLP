@@ -1,0 +1,53 @@
+# CMake
+!CMakeLists.txt
+!**/CMakeLists.txt
+/build*/
+/cmake-build-*/
+/out/
+/install/
+CMakeUserPresets.json
+compile_commands.json
+
+# Dependency worktrees
+/_deps/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Generated profiling and test output
+Testing/
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+
+# Local data (not distributed; see benchmarks/data/lpfeas/download.sh)
+/data/
+/benchmarks/data/**/*.mps
+/benchmarks/data/**/*.mps.gz
+/benchmarks/data/**/*.bz2
+/benchmarks/data/lpfeas/sources/
+/benchmarks/data/lpfeas/tools/
+
+# Local code index
+/.codegraph/
+
+# Internal planning notes (not distributed)
+/enhancement_plan.md
+
+# Benchmark outputs (local artifacts; regenerate with the runner)
+/benchmarks/results/
+
+# Python binding build artifacts
+/python/build/
+/python/_skbuild/
+/python/*.egg-info/
+/.pytest_cache/
+
+__pycache__/
+*.pyc

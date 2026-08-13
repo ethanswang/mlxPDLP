@@ -1,0 +1,9 @@
+NAME          FIXSPACE
+ROWS
+ N  OB1PNW20
+ G  DEDO3 1R
+COLUMNS
+    DEDO3 11  OB1PNW20        .02466   DEDO3 1R           -1.
+RHS
+    RHS 1     DEDO3 1R            3.
+ENDATA

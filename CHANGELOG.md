@@ -1,0 +1,91 @@
+# Changelog
+
+All notable changes to mlxPDLP will be documented in this file.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and the project intends to follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- Python bindings (nanobind + scikit-build-core) under `python/` with
+  NumPy CSR input, PSLP presolve, warm starts, MPS loading, CPU
+  float64 and Metal float32 device selection, and a small Netlib
+  regression through the binding.
+- Primal and dual warm starts in original, unscaled problem coordinates.
+- Guarded primal/dual feasibility polishing with `FEAS_POLISH_SUCCESS`
+  termination and per-phase timing.
+- Optional PSLP 0.0.8 presolve, early termination, and solution postsolve,
+  including installed-package dependency propagation.
+- Presolve and warm-start regression coverage for full reduction, partial
+  reduction, postsolve reconstruction, and infeasibility.
+- A fixed-work MPS CPU/Metal benchmark and the larger Netlib PILOT87 model
+  with reproducible provenance.
+- A CSR Metal matrix-vector backend with an explicitly stored sparse
+  transpose, dense fallback heuristics, and real-MPS backend-selection
+  coverage.
+- Sparse preprocessing regression coverage that verifies empty dense matrix
+  storage and duplicate-coordinate solutions on Metal.
+- An opt-in 40-case Netlib CTest regression for both CPU FP64 and Metal FP32.
+- A first-class parallel Netlib regression sweep with backend-aware worker
+  counts, longest-first queue seeding, dynamic work stealing, per-worker Metal
+  warmup, atomic checkpoint reports, and schema-v7 scheduling metadata.
+
+### Changed
+
+- Keep automatic LPfeas validation serial for attributable hard-case
+  diagnostics; explicit `--jobs N` remains available for experiments.
+
+- Run the complete CPU PDHG path in FP64, including dense MLX arrays,
+  reductions, scaling, iterates, and Accelerate sparse products. Metal remains
+  FP32, making CPU the higher-accuracy fallback instead of an arithmetic-match
+  backend.
+- Select an adaptive 256-thread Metal CSR kernel layout that packs short rows
+  while assigning long rows to full threadgroups.
+- Keep sparse Metal candidates in host CSR during Ruiz and Pock-Chambolle
+  preprocessing, avoiding dense matrix allocation and using
+  `O(nnz + m + n)` matrix storage and preprocessing work.
+- Use the cuPDLPx Ruiz definition on both sparse and dense paths by measuring
+  row and column maxima before applying either scale.
+- Keep matrix helpers lazy instead of eagerly evaluating their result before
+  the primal or dual update immediately evaluates the dependent graph.
+- Select two automatic CPU workers and up to 12 memory-bounded Metal workers,
+  based on measured suite-throughput scaling on a 16-core M3 Max.
+
+### Fixed
+
+- Correct primal-only FP32 near misses with a safeguarded host-FP64 descent on
+  the unscaled feasibility norm while preserving the incumbent objective; this
+  brings LPfeas `cont11` below the independent `1e-4` audit threshold.
+
+- Accumulate duplicate CSR coordinates during dense conversion instead of
+  silently keeping only the final coefficient.
+- Use a conservative Frobenius-norm fallback when the deterministic power
+  iteration start cannot produce a singular-value estimate.
+- Validate CSR row pointers, nonzero storage, and column-index ranges at
+  construction.
+- Pin a parallel sweep to one process-wide MLX backend so overlapping
+  `StreamContext` restoration cannot move CPU FP64 work onto Metal.
+- Detect Metal support from the selected MLX library directory when a cached
+  `MLX_BUILD_DIR` hint is stale.
+
+## [0.1.0] - 2026-07-26
+
+### Added
+
+- Standalone MLX CPU and Metal implementation of the PDLP algorithm.
+- Explicit device selection through `MlxPdlpSolver`.
+- Bundled plain and gzip MPS loader.
+- Netlib ADLITTLE CPU/GPU regression coverage.
+- Installable `mlxPDLP::solver` and `mlxPDLP::mps` CMake targets.
+- Downstream `find_package(mlxPDLP)` example.
+- macOS GitHub Actions build, test, install, and consumer validation.
+
+### Known limitations
+
+- Metal execution uses `float32` internally (Apple GPU kernels do not
+  expose float64); the CPU backend runs `float64` throughout.
+- Active infeasibility-certificate termination is not yet implemented;
+  infeasibility is currently detected through PSLP presolve.

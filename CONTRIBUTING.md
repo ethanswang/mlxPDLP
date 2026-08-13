@@ -1,0 +1,86 @@
+# Contributing to mlxPDLP
+
+Thanks for helping improve mlxPDLP.
+
+## Before opening a change
+
+- Use a focused issue or pull request.
+- Keep public API changes explicit in the pull-request description.
+- Add or update tests for numerical behavior.
+- Update `docs/architecture.md` when solver behavior or package structure
+  changes.
+- Add user-visible changes to `CHANGELOG.md`.
+
+## Development setup
+
+Build MLX separately, then configure mlxPDLP:
+
+```sh
+cmake -S . -B build \
+  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+Or use the checked-in presets:
+
+```sh
+export MLX_BUILD_DIR=/absolute/path/to/mlx/build
+cmake --preset dev
+cmake --build --preset dev
+ctest --preset dev
+```
+
+GPU comparison tests skip when the selected MLX build has no GPU backend.
+
+## Numerical regression
+
+Treat the 40-case Netlib corpus as the required convergence regression for a
+substantive solver, presolve, parser, correction, or numerical-backend change:
+
+```sh
+./benchmarks/data/netlib/download.sh
+cmake -S . -B build \
+  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build \
+  -DMLXPDLP_ENABLE_NETLIB_REGRESSION=ON
+cmake --build build --target mlxpdlp_netlib_regression
+```
+
+The CPU and Metal tests each audit all solutions in FP64 at `1e-4`. Netlib
+uses backend-aware parallel work stealing; automatic LPfeas validation stays
+serial because those harder cases should be diagnosed and timed one at a time.
+
+## Code style
+
+- C++ requires C++20.
+- Follow the checked-in `.clang-format` and `.editorconfig`.
+- Prefer explicit ownership and device selection.
+- Keep MLX operations on the solver's stored stream.
+- Preserve the public `double` API unless a versioned API change is intended.
+
+Format changed C and C++ files with:
+
+```sh
+clang-format -i path/to/changed_file.cpp
+```
+
+## Pull-request checklist
+
+- The project builds with warnings enabled.
+- `ctest` passes on MLX CPU.
+- The Netlib CPU and Metal regressions pass after substantive numerical
+  changes.
+- Metal-specific changes are tested on Apple Silicon when available.
+- Install and downstream-consumer behavior remain valid for packaging changes.
+- Documentation and changelog entries are current.
+
+## Reporting bugs
+
+Include:
+
+- mlxPDLP and MLX revisions;
+- macOS and Xcode versions;
+- CPU or GPU device selection;
+- CMake configuration output;
+- a minimal LP or MPS reproducer when possible;
+- complete solver termination metrics.

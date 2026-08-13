@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible mlxPDLP defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report a problem.
+  - type: input
+    id: revision
+    attributes:
+      label: mlxPDLP revision
+      description: Commit SHA or release tag.
+    validations:
+      required: true
+  - type: input
+    id: mlx
+    attributes:
+      label: MLX revision
+      description: Commit SHA or release tag and whether Metal was enabled.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS, Xcode, compiler, CMake, and hardware details.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Minimal source, LP, or MPS file and commands.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and termination metrics
+      render: shell
