@@ -21,6 +21,7 @@ limitations under the License.
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <sys/stat.h>
 #include <vector>
 
 namespace {
@@ -51,6 +52,16 @@ double max_abs(const std::vector<double> &values) {
 } // namespace
 
 int main() {
+    // The irish-e fixture is an LPfeas instance and is not distributed with
+    // this repository. Skip with CTest's skip code when the corpus has not
+    // been downloaded (benchmarks/data/lpfeas/download.sh).
+    struct stat fixture_info;
+    if (stat(IRISH_E_MPS, &fixture_info) != 0) {
+        std::printf("skipping: irish-e regression fixture not downloaded "
+                    "(run benchmarks/data/lpfeas/download.sh)\n");
+        return 77;
+    }
+
     std::unique_ptr<mlxpdlp_mps_problem_t, ProblemDeleter> problem(
         mlxpdlp_mps_problem_load(IRISH_E_MPS));
     if (!problem) {
