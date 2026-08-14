@@ -160,11 +160,19 @@ typedef struct {
 // Defined in solver.cpp.
 mx::array _mlx_empty_array();
 
+enum class SparseMetalSpmvStrategy : uint8_t {
+    scalar_rows,
+    simdgroup_rows,
+    adaptive,
+};
+
 struct MlxPdlpState {
     // Default constructor — initializes all mx::array fields to empty arrays
     // since mx::array has no default constructor.
     MlxPdlpState()
         : m(0), n(0), nnz(0), sparse_metal_active(false), sparse_cpu_active(false),
+          sparse_a_spmv_strategy(SparseMetalSpmvStrategy::adaptive),
+          sparse_at_spmv_strategy(SparseMetalSpmvStrategy::adaptive),
           cpu_double_precision_active(false),
           A(_mlx_empty_array()),
           AT(_mlx_empty_array()), var_lb(_mlx_empty_array()), var_ub(_mlx_empty_array()),
@@ -208,6 +216,10 @@ struct MlxPdlpState {
     int nnz;
     bool sparse_metal_active;
     bool sparse_cpu_active;
+    // A and A^T are profiled independently because their CSR row-length
+    // distributions can require different Metal thread mappings.
+    SparseMetalSpmvStrategy sparse_a_spmv_strategy;
+    SparseMetalSpmvStrategy sparse_at_spmv_strategy;
     // CPU execution deliberately uses float64 throughout PDHG. Metal remains
     // float32 because Apple GPU kernels do not support float64 arithmetic.
     bool cpu_double_precision_active;
@@ -468,7 +480,7 @@ class MlxPdlpSolver {
     mx::array sparse_matvec(const mx::array &row_ptr, const mx::array &col_ind,
                             const mx::array &values, const mx::array &work_offsets,
                             const mx::array &work_rows, const mx::array &x, int rows,
-                            int work_item_count);
+                            int work_item_count, SparseMetalSpmvStrategy strategy);
     void capture_sparse_matrix(int rows, int cols, const int *row_ptr, const int *col_ind,
                                const double *values);
     void apply_sparse_scaling(const std::vector<double> &con_scale,

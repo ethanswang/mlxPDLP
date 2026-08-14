@@ -164,7 +164,14 @@ bool sparse_duplicate_diagonal_matches(const mx::Device &device) {
 
     bool expected_backend = device.type == mx::Device::gpu ? solver.state().sparse_metal_active
                                                            : !solver.state().sparse_metal_active;
+    bool expected_strategy =
+        device.type != mx::Device::gpu ||
+        (solver.state().sparse_a_spmv_strategy ==
+             SparseMetalSpmvStrategy::scalar_rows &&
+         solver.state().sparse_at_spmv_strategy ==
+             SparseMetalSpmvStrategy::scalar_rows);
     bool valid = storage_matches_backend && expected_backend &&
+                 expected_strategy &&
                  result->termination_reason == TERMINATION_REASON_OPTIMAL;
     for (int i = 0; i < size && valid; ++i) {
         valid = std::fabs(result->primal_solution[i] - constraint_bound[i]) <= 5e-3;
@@ -234,6 +241,11 @@ bool sparse_mixed_row_lengths_match(const mx::Device &device) {
 
     bool valid = expected_sparse_backend &&
                  (device.type != mx::Device::gpu || solver.state().sparse_metal_active) &&
+                 (device.type != mx::Device::gpu ||
+                  (solver.state().sparse_a_spmv_strategy ==
+                       SparseMetalSpmvStrategy::scalar_rows &&
+                   solver.state().sparse_at_spmv_strategy ==
+                       SparseMetalSpmvStrategy::adaptive)) &&
                  result->relative_primal_residual <= 1e-6 &&
                  result->relative_dual_residual <= 1e-6 &&
                  result->relative_objective_gap <= 1e-6;
@@ -243,6 +255,80 @@ bool sparse_mixed_row_lengths_match(const mx::Device &device) {
     std::printf("%-8s sparse mixed-row backend=%s residuals=(%.2e, %.2e, %.2e) %s\n",
                 device_name(device),
                 solver.state().sparse_metal_active ? "CSR-Metal" : "dense-MLX",
+                result->relative_primal_residual, result->relative_dual_residual,
+                result->relative_objective_gap, valid ? "PASS" : "FAIL");
+    destroy_result(result);
+    return valid;
+}
+
+bool sparse_simdgroup_rows_match() {
+    // Uniform 65-entry rows sit immediately above the adaptive kernel's
+    // scalar-row cutoff. They must use one SIMD group per row rather than a
+    // 256-thread, eight-barrier reduction for each row.
+    constexpr int size = 512;
+    constexpr int entries_per_row = 65;
+    constexpr double diagonal_value = 2.0;
+    constexpr double off_diagonal_value = 0.01;
+    const double row_sum =
+        diagonal_value + (entries_per_row - 1) * off_diagonal_value;
+
+    std::vector<int> row_ptr(static_cast<size_t>(size) + 1);
+    std::vector<int> col_ind;
+    std::vector<double> values;
+    col_ind.reserve(static_cast<size_t>(size) * entries_per_row);
+    values.reserve(static_cast<size_t>(size) * entries_per_row);
+    for (int row = 0; row < size; ++row) {
+        row_ptr[static_cast<size_t>(row)] = static_cast<int>(col_ind.size());
+        for (int entry = 0; entry < entries_per_row; ++entry) {
+            col_ind.push_back((row + entry) % size);
+            values.push_back(entry == 0 ? diagonal_value : off_diagonal_value);
+        }
+    }
+    row_ptr.back() = static_cast<int>(col_ind.size());
+
+    std::vector<double> objective(static_cast<size_t>(size), 0.0);
+    std::vector<double> constraint_bound(static_cast<size_t>(size), row_sum);
+    std::vector<double> variable_lb(static_cast<size_t>(size), -INFINITY);
+    std::vector<double> variable_ub(static_cast<size_t>(size), INFINITY);
+    std::vector<double> primal_start(static_cast<size_t>(size), 1.0);
+    std::vector<double> dual_start(static_cast<size_t>(size), 0.0);
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.curtis_reid_iterations = 0;
+    params.l_inf_ruiz_iterations = 0;
+    params.has_pock_chambolle_alpha = false;
+    params.bound_objective_rescaling = false;
+    params.feasibility_polishing = false;
+    params.host_double_polishing = false;
+    params.sv_max_iter = 20;
+    params.termination_evaluation_frequency = 2;
+    params.termination_criteria.eps_optimal_relative = 0.0;
+    params.termination_criteria.eps_feasible_relative = 0.0;
+    params.termination_criteria.iteration_limit = 0;
+    params.termination_criteria.time_sec_limit = 10.0;
+
+    MlxPdlpSolver solver(size, size, row_ptr.data(), col_ind.data(), values.data(),
+                         variable_lb.data(), variable_ub.data(), constraint_bound.data(),
+                         constraint_bound.data(), objective.data(), 0.0, &params,
+                         primal_start.data(), dual_start.data(), mx::Device::gpu);
+    mlxpdlp_result_t *result = solver.solve();
+    mx::synchronize(solver.state().stream);
+
+    bool valid = solver.state().sparse_metal_active &&
+                 solver.state().sparse_a_spmv_strategy ==
+                     SparseMetalSpmvStrategy::simdgroup_rows &&
+                 solver.state().sparse_at_spmv_strategy ==
+                     SparseMetalSpmvStrategy::simdgroup_rows &&
+                 result->relative_primal_residual <= 1e-6 &&
+                 result->relative_dual_residual <= 1e-6 &&
+                 result->relative_objective_gap <= 1e-6;
+    for (int i = 0; i < size && valid; ++i) {
+        valid = std::fabs(result->primal_solution[i] - 1.0) <= 1e-6;
+    }
+    std::printf("MLX/GPU  sparse SIMD-group 65-entry rows residuals=(%.2e, %.2e, %.2e) %s\n",
                 result->relative_primal_residual, result->relative_dual_residual,
                 result->relative_objective_gap, valid ? "PASS" : "FAIL");
     destroy_result(result);
@@ -359,6 +445,10 @@ int main() {
     }
     if (!sparse_mixed_row_lengths_match(mx::Device::gpu)) {
         std::fprintf(stderr, "adaptive sparse mixed-row regression failed\n");
+        return 1;
+    }
+    if (!sparse_simdgroup_rows_match()) {
+        std::fprintf(stderr, "sparse SIMD-group row regression failed\n");
         return 1;
     }
 

@@ -815,6 +815,64 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
         std::vector<int32_t> rows;
         int item_count = 0;
     };
+
+    struct RowProfile {
+        int rows = 0;
+        int nonzeros = 0;
+        int max_row_nonzeros = 0;
+        int tiny_rows = 0;
+        int rows_over_adaptive_cutoff = 0;
+    };
+
+    auto profile_rows = [](const std::vector<int32_t> &row_ptr, int row_count) {
+        constexpr int scalar_row_max_nonzeros = 16;
+        constexpr int adaptive_short_row_max_nonzeros = 64;
+        RowProfile profile;
+        profile.rows = row_count;
+        profile.nonzeros = row_ptr.empty() ? 0 : row_ptr.back();
+        for (int row = 0; row < row_count; ++row) {
+            const int length = row_ptr[static_cast<size_t>(row) + 1] -
+                               row_ptr[static_cast<size_t>(row)];
+            profile.max_row_nonzeros = std::max(profile.max_row_nonzeros, length);
+            if (length <= scalar_row_max_nonzeros) {
+                ++profile.tiny_rows;
+            }
+            if (length > adaptive_short_row_max_nonzeros) {
+                ++profile.rows_over_adaptive_cutoff;
+            }
+        }
+        return profile;
+    };
+
+    auto select_strategy = [](const RowProfile &profile) {
+        constexpr int scalar_row_max_nonzeros = 16;
+        // At 64 entries the scalar-row mapping is still competitive on small
+        // matrices. Once there is enough aggregate work, a SIMD-group per row
+        // wins by coalescing the CSR stream. Rows just above 64 need that path
+        // even sooner: the adaptive fallback otherwise assigns all 256 threads
+        // and eight barriers to only 65 products.
+        constexpr int simdgroup_short_matrix_nnz_threshold = 8 * 1024 * 1024;
+        if (profile.max_row_nonzeros <= scalar_row_max_nonzeros) {
+            return SparseMetalSpmvStrategy::scalar_rows;
+        }
+
+        const int64_t rows = profile.rows;
+        const int64_t nonzeros = profile.nonzeros;
+        const bool medium_workload =
+            nonzeros >= 32 * rows && nonzeros <= 512 * rows &&
+            static_cast<int64_t>(profile.tiny_rows) * 2 < rows;
+        const bool many_rows_cross_adaptive_cutoff =
+            static_cast<int64_t>(profile.rows_over_adaptive_cutoff) * 4 >=
+            static_cast<int64_t>(profile.rows);
+        const bool large_uniform_short_matrix =
+            profile.nonzeros >= simdgroup_short_matrix_nnz_threshold;
+        if (medium_workload &&
+            (many_rows_cross_adaptive_cutoff || large_uniform_short_matrix)) {
+            return SparseMetalSpmvStrategy::simdgroup_rows;
+        }
+        return SparseMetalSpmvStrategy::adaptive;
+    };
+
     auto build_adaptive_work = [](const std::vector<int32_t> &row_ptr, int row_count) {
         constexpr int short_row_max_nonzeros = 64;
         constexpr size_t threadgroup_width = 256;
@@ -853,35 +911,55 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
         return work;
     };
 
-    const AdaptiveWork matrix_work =
-        build_adaptive_work(sparse_a_row_ptr_host_, s_.m);
-    const AdaptiveWork transpose_work =
-        build_adaptive_work(sparse_at_row_ptr_host_, s_.n);
-    sparse_a_work_offsets_ =
-        mx::array(matrix_work.offsets.data(),
-                  {static_cast<int>(matrix_work.offsets.size())}, mx::int32);
-    sparse_a_work_rows_ =
-        mx::array(matrix_work.rows.data(), {static_cast<int>(matrix_work.rows.size())},
-                  mx::int32);
-    sparse_a_work_item_count_ = matrix_work.item_count;
-    sparse_at_work_offsets_ =
-        mx::array(transpose_work.offsets.data(),
-                  {static_cast<int>(transpose_work.offsets.size())}, mx::int32);
-    sparse_at_work_rows_ =
-        mx::array(transpose_work.rows.data(),
-                  {static_cast<int>(transpose_work.rows.size())}, mx::int32);
-    sparse_at_work_item_count_ = transpose_work.item_count;
+    s_.sparse_a_spmv_strategy =
+        select_strategy(profile_rows(sparse_a_row_ptr_host_, s_.m));
+    s_.sparse_at_spmv_strategy =
+        select_strategy(profile_rows(sparse_at_row_ptr_host_, s_.n));
+
+    auto prepare_adaptive_work = [&](const std::vector<int32_t> &row_ptr, int row_count,
+                                     SparseMetalSpmvStrategy strategy,
+                                     mx::array &work_offsets, mx::array &work_rows,
+                                     int &work_item_count) {
+        if (strategy != SparseMetalSpmvStrategy::adaptive) {
+            return;
+        }
+        const AdaptiveWork work = build_adaptive_work(row_ptr, row_count);
+        work_offsets = mx::array(work.offsets.data(),
+                                 {static_cast<int>(work.offsets.size())}, mx::int32);
+        work_rows = mx::array(work.rows.data(),
+                              {static_cast<int>(work.rows.size())}, mx::int32);
+        work_item_count = work.item_count;
+    };
+    prepare_adaptive_work(sparse_a_row_ptr_host_, s_.m, s_.sparse_a_spmv_strategy,
+                          sparse_a_work_offsets_, sparse_a_work_rows_,
+                          sparse_a_work_item_count_);
+    prepare_adaptive_work(sparse_at_row_ptr_host_, s_.n, s_.sparse_at_spmv_strategy,
+                          sparse_at_work_offsets_, sparse_at_work_rows_,
+                          sparse_at_work_item_count_);
 
     s_.sparse_metal_active = true;
     mx::synchronize(s_.stream);
 
     if (params_.verbose) {
+        auto strategy_name = [](SparseMetalSpmvStrategy strategy) {
+            switch (strategy) {
+            case SparseMetalSpmvStrategy::scalar_rows:
+                return "scalar-row";
+            case SparseMetalSpmvStrategy::simdgroup_rows:
+                return "SIMD-group-row";
+            case SparseMetalSpmvStrategy::adaptive:
+                return "adaptive";
+            }
+            return "unknown";
+        };
         double sparse_mib = (2.0 * sparse_nnz * (sizeof(float) + sizeof(int32_t)) +
                              (static_cast<double>(s_.m) + s_.n + 2.0) * sizeof(int32_t)) /
                             (1024.0 * 1024.0);
         printf("  sparse Metal SpMV enabled (CSR + transpose CSR: %.2f MiB; "
-               "adaptive work items A=%d, A^T=%d)\n",
-               sparse_mib, sparse_a_work_item_count_, sparse_at_work_item_count_);
+               "strategies A=%s, A^T=%s; adaptive work items A=%d, A^T=%d)\n",
+               sparse_mib, strategy_name(s_.sparse_a_spmv_strategy),
+               strategy_name(s_.sparse_at_spmv_strategy), sparse_a_work_item_count_,
+               sparse_at_work_item_count_);
     }
 }
 
@@ -965,8 +1043,59 @@ mx::array MlxPdlpSolver::sparse_matvec(const mx::array &row_ptr, const mx::array
                                        const mx::array &values,
                                        const mx::array &work_offsets,
                                        const mx::array &work_rows, const mx::array &x,
-                                       int rows, int work_item_count) {
-    static const auto kernel = mx::fast::metal_kernel(
+                                       int rows, int work_item_count,
+                                       SparseMetalSpmvStrategy strategy) {
+    constexpr int threadgroup_width = 256;
+
+    if (strategy == SparseMetalSpmvStrategy::scalar_rows) {
+        static const auto scalar_kernel = mx::fast::metal_kernel(
+            "mlxpdlp_csr_spmv_scalar_rows",
+            {"row_starts", "column_indices", "nonzeros", "vector"},
+            {"output"},
+            R"(
+                uint row = thread_position_in_grid.x;
+                float total = 0.0f;
+                int begin = row_starts[row];
+                int end = row_starts[row + 1];
+                for (int k = begin; k < end; ++k) {
+                    total += nonzeros[k] * vector[column_indices[k]];
+                }
+                output[row] = total;
+            )");
+        return scalar_kernel({row_ptr, col_ind, values, x}, {{rows}}, {mx::float32},
+                             {rows, 1, 1}, {threadgroup_width, 1, 1}, {},
+                             std::nullopt, false, s_.stream)[0];
+    }
+
+    if (strategy == SparseMetalSpmvStrategy::simdgroup_rows) {
+        static const auto simdgroup_kernel = mx::fast::metal_kernel(
+            "mlxpdlp_csr_spmv_simdgroup_rows",
+            {"row_starts", "column_indices", "nonzeros", "vector"},
+            {"output"},
+            R"(
+                constexpr uint simdgroup_width = 32;
+                uint lane = thread_index_in_simdgroup;
+                uint row = thread_position_in_grid.x / simdgroup_width;
+                float partial = 0.0f;
+                int begin = row_starts[row];
+                int end = row_starts[row + 1];
+                for (int k = begin + int(lane); k < end;
+                     k += int(simdgroup_width)) {
+                    partial += nonzeros[k] * vector[column_indices[k]];
+                }
+                float total = simd_sum(partial);
+                if (lane == 0) {
+                    output[row] = total;
+                }
+            )");
+        const int grid = rows * 32;
+        return simdgroup_kernel({row_ptr, col_ind, values, x}, {{rows}},
+                                {mx::float32}, {grid, 1, 1},
+                                {threadgroup_width, 1, 1}, {}, std::nullopt,
+                                false, s_.stream)[0];
+    }
+
+    static const auto adaptive_kernel = mx::fast::metal_kernel(
         "mlxpdlp_csr_spmv_adaptive",
         {"row_starts", "column_indices", "nonzeros", "work_offsets", "work_rows", "vector"},
         {"output"},
@@ -1014,12 +1143,12 @@ mx::array MlxPdlpSolver::sparse_matvec(const mx::array &row_ptr, const mx::array
             }
         )");
 
-    constexpr int threadgroup_width = 256;
     int grid = work_item_count * threadgroup_width;
     int threadgroup = threadgroup_width;
-    return kernel({row_ptr, col_ind, values, work_offsets, work_rows, x}, {{rows}},
-                  {mx::float32}, {grid, 1, 1}, {threadgroup, 1, 1}, {},
-                  std::nullopt, false, s_.stream)[0];
+    return adaptive_kernel({row_ptr, col_ind, values, work_offsets, work_rows, x},
+                           {{rows}}, {mx::float32}, {grid, 1, 1},
+                           {threadgroup, 1, 1}, {}, std::nullopt, false,
+                           s_.stream)[0];
 }
 
 mx::array MlxPdlpSolver::sparse_cpu_matvec(const mx::array &x, bool transpose,
@@ -1045,7 +1174,7 @@ mx::array MlxPdlpSolver::mat_Ax(const mx::array &x) {
     if (s_.sparse_metal_active) {
         return sparse_matvec(sparse_a_row_ptr_, sparse_a_col_ind_, sparse_a_values_,
                              sparse_a_work_offsets_, sparse_a_work_rows_, x, s_.m,
-                             sparse_a_work_item_count_);
+                             sparse_a_work_item_count_, s_.sparse_a_spmv_strategy);
     }
     if (s_.sparse_cpu_active) {
         return sparse_cpu_matvec(x, false, s_.m);
@@ -1062,7 +1191,7 @@ mx::array MlxPdlpSolver::mat_ATx(const mx::array &y) {
     if (s_.sparse_metal_active) {
         return sparse_matvec(sparse_at_row_ptr_, sparse_at_col_ind_, sparse_at_values_,
                              sparse_at_work_offsets_, sparse_at_work_rows_, y, s_.n,
-                             sparse_at_work_item_count_);
+                             sparse_at_work_item_count_, s_.sparse_at_spmv_strategy);
     }
     if (s_.sparse_cpu_active) {
         return sparse_cpu_matvec(y, true, s_.n);
