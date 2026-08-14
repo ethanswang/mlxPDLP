@@ -153,6 +153,7 @@ mkdir -p "$case_dir/deps/mlx" "$case_dir/deps/mlx.download"
 : > "$case_dir/deps/mlx.download/partial-download"
 env \
     PATH="$fake_bin:/usr/bin:/bin" \
+    CMAKE_BUILD_PARALLEL_LEVEL=3 \
     FAKE_CMAKE_LOG="$cmake_log" \
     FAKE_GIT_LOG="$git_log" \
     FAKE_MLX_AVAILABLE=no \
@@ -176,6 +177,7 @@ env \
     fail "recovered MLX was not installed"
 assert_contains "$case_dir/output" "recovering the managed MLX source directory"
 assert_contains "$case_dir/output" "recovering an interrupted MLX download"
+assert_contains "$cmake_log" "$case_dir/deps/mlx-build --parallel 3"
 
 new_case conflict
 if env \

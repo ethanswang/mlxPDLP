@@ -18,7 +18,8 @@ CMAKE ?= cmake
 CTEST ?= ctest
 BUILD_DIR ?= build
 CMAKE_ARGS ?=
-CMAKE_BUILD_ARGS ?= --parallel
+CMAKE_BUILD_PARALLEL_LEVEL ?= 3
+CMAKE_BUILD_ARGS ?= --parallel $(CMAKE_BUILD_PARALLEL_LEVEL)
 CMAKE_TEST_ARGS ?= --output-on-failure
 CMAKE_INSTALL_ARGS ?=
 # MLXPDLP_FETCH_MLX is retained as a compatibility alias. Leave both
@@ -38,6 +39,7 @@ endif
 
 export CMAKE
 export CMAKE_ARGS
+export CMAKE_BUILD_PARALLEL_LEVEL
 export MLX_BUILD_DIR
 export MLX_ROOT
 export MLX_SOURCE_DIR
@@ -87,3 +89,4 @@ help:
 	@echo "  MLXPDLP_MLX_CMAKE_ARGS='-D...' Extra managed-MLX configure arguments"
 	@echo "  BUILD_DIR=/path               mlxPDLP build directory (default: build)"
 	@echo "  CMAKE_ARGS='-D...'            Extra mlxPDLP configure arguments"
+	@echo "  CMAKE_BUILD_PARALLEL_LEVEL=N  Compile jobs (default: 3)"

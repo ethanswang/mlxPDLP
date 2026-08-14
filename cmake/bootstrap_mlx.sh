@@ -22,6 +22,7 @@ fail() {
 }
 
 cmake_command=${CMAKE:-cmake}
+mlx_build_parallel_level=${CMAKE_BUILD_PARALLEL_LEVEL:-3}
 source_dir=${MLXPDLP_SOURCE_DIR:-}
 build_dir=${MLXPDLP_BUILD_DIR:-}
 deps_dir=${MLXPDLP_DEPS_DIR:-}
@@ -100,6 +101,12 @@ request_download_approval() {
 
 command -v "$cmake_command" >/dev/null 2>&1 ||
     fail "CMake was not found (CMAKE=$cmake_command)"
+
+case "$mlx_build_parallel_level" in
+    0|*[!0-9]*)
+        fail "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer"
+        ;;
+esac
 
 mlx_root=${MLX_ROOT:-}
 mlx_source_dir=${MLX_SOURCE_DIR:-}
@@ -244,8 +251,10 @@ if [ "$have_mlx" = no ]; then
     fi
     "$@"
 
-    printf 'mlxPDLP: building MLX\n'
-    "$cmake_command" --build "$managed_build_dir" --parallel
+    printf 'mlxPDLP: building MLX with %s parallel jobs\n' \
+        "$mlx_build_parallel_level"
+    "$cmake_command" --build "$managed_build_dir" \
+        --parallel "$mlx_build_parallel_level"
 
     printf 'mlxPDLP: installing MLX in %s\n' "$managed_root"
     "$cmake_command" --install "$managed_build_dir" \

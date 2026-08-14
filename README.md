@@ -79,6 +79,10 @@ privately under `_deps/` or the project build tree; no system prefix is
 modified. The same `make` invocation then configures and builds mlxPDLP. Later
 invocations reuse complete local dependencies without prompting.
 
+Dependency and project compilation default to three parallel jobs to avoid
+overcommitting memory during MLX's Metal-kernel build. Override the limit with
+`make CMAKE_BUILD_PARALLEL_LEVEL=N` when the machine has more capacity.
+
 For a noninteractive build, the opt-in itself records approval:
 
 ```sh

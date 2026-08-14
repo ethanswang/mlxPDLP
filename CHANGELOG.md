@@ -65,6 +65,8 @@ and the project intends to follow
 
 ### Fixed
 
+- Bound managed MLX compilation to a configurable number of jobs so cache-miss
+  builds do not overload GitHub's hosted macOS runner and time out.
 - Correct primal-only FP32 near misses with a safeguarded host-FP64 descent on
   the unscaled feasibility norm while preserving the incumbent objective; this
   brings LPfeas `cont11` below the independent `1e-4` audit threshold.
