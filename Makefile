@@ -18,8 +18,19 @@ CMAKE ?= cmake
 CTEST ?= ctest
 BUILD_DIR ?= build
 CMAKE_ARGS ?=
-CMAKE_BUILD_PARALLEL_LEVEL ?= 3
-CMAKE_BUILD_ARGS ?= --parallel $(CMAKE_BUILD_PARALLEL_LEVEL)
+# GNU Make 3.81 finishes populating MAKEFLAGS only after reading this file, so
+# these variables stay recursively expanded until a recipe is launched.
+MLXPDLP_MAKE_PARALLEL = $(strip \
+    $(filter -j% --jobs=% --jobserver-fds=% --jobserver-auth=%,$(MAKEFLAGS)) \
+    $(findstring j,$(firstword $(MAKEFLAGS))))
+MLXPDLP_DEFAULT_PARALLEL_LEVEL := 3
+MLXPDLP_LOCAL_CPU_COUNT ?= $(strip $(shell getconf _NPROCESSORS_ONLN 2>/dev/null))
+MLXPDLP_DETECTED_PARALLEL_LEVEL = $(if $(MLXPDLP_LOCAL_CPU_COUNT),$(MLXPDLP_LOCAL_CPU_COUNT),$(MLXPDLP_DEFAULT_PARALLEL_LEVEL))
+MLXPDLP_MAKE_PARALLEL_LEVEL = $(if $(MLXPDLP_MAKE_PARALLEL),$(MLXPDLP_DETECTED_PARALLEL_LEVEL),)
+CMAKE_BUILD_PARALLEL_LEVEL ?=
+MLXPDLP_REQUESTED_PARALLEL_LEVEL = $(if $(CMAKE_BUILD_PARALLEL_LEVEL),$(CMAKE_BUILD_PARALLEL_LEVEL),$(MLXPDLP_MAKE_PARALLEL_LEVEL))
+MLXPDLP_EFFECTIVE_PARALLEL_LEVEL = $(if $(MLXPDLP_REQUESTED_PARALLEL_LEVEL),$(MLXPDLP_REQUESTED_PARALLEL_LEVEL),$(MLXPDLP_DEFAULT_PARALLEL_LEVEL))
+CMAKE_BUILD_ARGS ?= --parallel $(MLXPDLP_EFFECTIVE_PARALLEL_LEVEL)
 CMAKE_TEST_ARGS ?= --output-on-failure
 CMAKE_INSTALL_ARGS ?=
 # MLXPDLP_FETCH_MLX is retained as a compatibility alias. Leave both
@@ -47,6 +58,7 @@ export MLXPDLP_BUILD_DIR
 export MLXPDLP_DEPS_DIR
 export MLXPDLP_FETCH_DEPS
 export MLXPDLP_FETCH_MLX
+export MLXPDLP_MAKE_PARALLEL_LEVEL
 export MLXPDLP_MLX_CMAKE_ARGS
 export MLXPDLP_MLX_REPOSITORY
 export MLXPDLP_MLX_REVISION
@@ -58,7 +70,7 @@ configure:
 	@sh "$(MLXPDLP_SOURCE_DIR)/cmake/bootstrap_mlx.sh"
 
 build: configure
-	@$(CMAKE) --build "$(MLXPDLP_BUILD_DIR)" $(CMAKE_BUILD_ARGS)
+	@MAKEFLAGS= $(CMAKE) --build "$(MLXPDLP_BUILD_DIR)" $(CMAKE_BUILD_ARGS)
 
 test: build
 	@$(CTEST) --test-dir "$(MLXPDLP_BUILD_DIR)" $(CMAKE_TEST_ARGS)
@@ -70,6 +82,7 @@ help:
 	@echo "mlxPDLP source build"
 	@echo
 	@echo "  make              Find or obtain MLX, then configure and build mlxPDLP"
+	@echo "  make -j           Use all detected logical CPUs for compilation"
 	@echo "  make test         Build and run CTest"
 	@echo "  make install      Build and run cmake --install"
 	@echo
@@ -89,4 +102,5 @@ help:
 	@echo "  MLXPDLP_MLX_CMAKE_ARGS='-D...' Extra managed-MLX configure arguments"
 	@echo "  BUILD_DIR=/path               mlxPDLP build directory (default: build)"
 	@echo "  CMAKE_ARGS='-D...'            Extra mlxPDLP configure arguments"
-	@echo "  CMAKE_BUILD_PARALLEL_LEVEL=N  Compile jobs (default: 3)"
+	@echo "  CMAKE_BUILD_PARALLEL_LEVEL=N  Explicit compile-job override"
+	@echo "                                  (plain make default: 3)"

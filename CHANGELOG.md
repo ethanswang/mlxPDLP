@@ -44,6 +44,8 @@ and the project intends to follow
 
 ### Changed
 
+- Propagate local `make -j` into managed MLX and mlxPDLP builds using the
+  detected logical CPU count while retaining CI's explicit three-job limit.
 - Keep automatic LPfeas validation serial for attributable hard-case
   diagnostics; explicit `--jobs N` remains available for experiments.
 

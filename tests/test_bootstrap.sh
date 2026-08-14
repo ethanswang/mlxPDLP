@@ -147,6 +147,44 @@ env \
     fail "fully local configure did not remain offline"
 assert_not_contains "$case_dir/output" "Download and build"
 
+new_case make_j
+env \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    CMAKE=cmake \
+    FAKE_CMAKE_LOG="$cmake_log" \
+    FAKE_GIT_LOG="$git_log" \
+    FAKE_MLX_AVAILABLE=yes \
+    FAKE_MLX_REVISION="$revision" \
+    FAKE_POLICY_LOG="$policy_log" \
+    FAKE_PSLP_MISSING=no \
+    FAKE_SOURCE_DIR="$source_dir" \
+    MLXPDLP_DEPS_DIR="$case_dir/deps" \
+    MLXPDLP_FETCH_DEPS=OFF \
+    MLXPDLP_LOCAL_CPU_COUNT=12 \
+    make -j -C "$source_dir" BUILD_DIR="$case_dir/build" build \
+    > "$case_dir/output" 2>&1
+assert_contains "$cmake_log" "$case_dir/build --parallel 12"
+
+new_case make_j_override
+env \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    CMAKE=cmake \
+    CMAKE_BUILD_PARALLEL_LEVEL=3 \
+    FAKE_CMAKE_LOG="$cmake_log" \
+    FAKE_GIT_LOG="$git_log" \
+    FAKE_MLX_AVAILABLE=yes \
+    FAKE_MLX_REVISION="$revision" \
+    FAKE_POLICY_LOG="$policy_log" \
+    FAKE_PSLP_MISSING=no \
+    FAKE_SOURCE_DIR="$source_dir" \
+    MLXPDLP_DEPS_DIR="$case_dir/deps" \
+    MLXPDLP_FETCH_DEPS=OFF \
+    MLXPDLP_LOCAL_CPU_COUNT=12 \
+    make -j -C "$source_dir" BUILD_DIR="$case_dir/build" build \
+    > "$case_dir/output" 2>&1
+assert_contains "$cmake_log" "$case_dir/build --parallel 3"
+assert_not_contains "$cmake_log" "$case_dir/build --parallel 12"
+
 new_case recovery
 mkdir -p "$case_dir/deps/mlx" "$case_dir/deps/mlx.download"
 : > "$case_dir/deps/mlx/partial-checkout"
@@ -178,6 +216,26 @@ env \
 assert_contains "$case_dir/output" "recovering the managed MLX source directory"
 assert_contains "$case_dir/output" "recovering an interrupted MLX download"
 assert_contains "$cmake_log" "$case_dir/deps/mlx-build --parallel 3"
+
+new_case make_parallel
+env \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    FAKE_CMAKE_LOG="$cmake_log" \
+    FAKE_GIT_LOG="$git_log" \
+    FAKE_MLX_AVAILABLE=no \
+    FAKE_MLX_REVISION="$revision" \
+    FAKE_POLICY_LOG="$policy_log" \
+    FAKE_PSLP_MISSING=no \
+    FAKE_SOURCE_DIR="$source_dir" \
+    MLXPDLP_BUILD_DIR="$case_dir/build" \
+    MLXPDLP_DEPS_DIR="$case_dir/deps" \
+    MLXPDLP_FETCH_DEPS=ON \
+    MLXPDLP_MAKE_PARALLEL_LEVEL=12 \
+    MLXPDLP_MLX_REVISION="$revision" \
+    MLXPDLP_SOURCE_DIR="$source_dir" \
+    sh "$bootstrap" > "$case_dir/output" 2>&1
+assert_contains "$case_dir/output" "building MLX with 12 parallel jobs"
+assert_contains "$cmake_log" "$case_dir/deps/mlx-build --parallel 12"
 
 new_case conflict
 if env \

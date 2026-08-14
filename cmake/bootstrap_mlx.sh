@@ -22,7 +22,7 @@ fail() {
 }
 
 cmake_command=${CMAKE:-cmake}
-mlx_build_parallel_level=${CMAKE_BUILD_PARALLEL_LEVEL:-3}
+mlx_build_parallel_level=${CMAKE_BUILD_PARALLEL_LEVEL:-${MLXPDLP_MAKE_PARALLEL_LEVEL:-3}}
 source_dir=${MLXPDLP_SOURCE_DIR:-}
 build_dir=${MLXPDLP_BUILD_DIR:-}
 deps_dir=${MLXPDLP_DEPS_DIR:-}
@@ -253,7 +253,7 @@ if [ "$have_mlx" = no ]; then
 
     printf 'mlxPDLP: building MLX with %s parallel jobs\n' \
         "$mlx_build_parallel_level"
-    "$cmake_command" --build "$managed_build_dir" \
+    MAKEFLAGS= "$cmake_command" --build "$managed_build_dir" \
         --parallel "$mlx_build_parallel_level"
 
     printf 'mlxPDLP: installing MLX in %s\n' "$managed_root"
