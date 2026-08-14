@@ -56,17 +56,17 @@ From the mlxPDLP repository root:
 ```sh
 make
 ./build/mlxpdlp_example
+./build/mlxpdlp_tiny_convergence
+./build/mlxpdlp_netlib_convergence
 ./build/mlxpdlp_metal_acceleration
 make test
 ```
 
-The first executable solves and validates a two-variable LP explicitly on
-`mx::Device::gpu`; its output confirms the Metal FP32 backend and the number of
-PDHG iterations. The second generates a larger sparse LP in memory, warms both
-devices, and times identical fixed work on Accelerate CPU FP64 and Metal FP32.
-It needs no downloaded model data. A tiny LP proves API correctness but cannot
-show acceleration because GPU launch overhead dominates, so the two concerns
-are intentionally separate.
+The examples separate one-shot Metal correctness, fixed-iteration convergence,
+and acceleration. The convergence programs compare CPU FP64 with Metal FP32 on
+an exact two-variable LP and the bundled Netlib ADLITTLE model. The acceleration
+program generates a much larger sparse LP and times identical fixed work. A
+tiny LP proves API correctness but cannot show GPU acceleration.
 
 `make` checks the current build cache, `MLX_ROOT`, `MLX_SOURCE_DIR`, and
 `MLX_BUILD_DIR`, followed by normal CMake search locations. It first attempts
@@ -136,7 +136,32 @@ mlxpdlp_result_free(result);
 ```
 
 See [`examples/basic.cpp`](examples/basic.cpp) for the complete copyable LP,
-backend checks, result ownership, and validation. The self-contained
+backend checks, result ownership, and validation.
+
+For convergence rather than timing, run:
+
+```sh
+./build/mlxpdlp_tiny_convergence
+./build/mlxpdlp_netlib_convergence
+```
+
+[`examples/tiny_convergence.cpp`](examples/tiny_convergence.cpp) runs the exact
+two-variable LP at 10, 50, 100, 200, 500, 1,000, and 5,000 iterations. It
+reports `||x-x*||inf`, absolute primal and dual residuals, absolute duality gap,
+and objective for CPU FP64 and Metal FP32.
+[`examples/netlib_convergence.cpp`](examples/netlib_convergence.cpp) runs the
+same diagnostic on the bundled 97-variable, 56-constraint Netlib ADLITTLE model
+through 20,000 iterations and compares with its published objective. Presolve
+and polishing are disabled so every row measures raw PDHG progress; neither
+program reports a performance conclusion.
+
+The exact sweep is also the labeled regression smoke test:
+
+```sh
+ctest --test-dir build -L smoke --output-on-failure
+```
+
+The self-contained
 [`examples/metal_acceleration.cpp`](examples/metal_acceleration.cpp) uses a
 generated 163,840-by-163,840 CSR matrix with 10,485,760 nonzeros and 1,000
 PDHG iterations by default:
@@ -205,7 +230,7 @@ not part of the tested dependency combination.
 | `BUILD_TESTING` | `ON` | Build the regression and device tests |
 | `MLXPDLP_BUILD_PRESOLVE` | `ON` | Build PSLP 0.0.8 presolve/postsolve support |
 | `MLXPDLP_BUILD_MPS` | `ON` | Build the bundled MPS loader |
-| `MLXPDLP_BUILD_EXAMPLES` | `ON` | Build the trivial Metal and acceleration examples |
+| `MLXPDLP_BUILD_EXAMPLES` | `ON` | Build Metal correctness, convergence, and acceleration examples |
 | `MLXPDLP_BUILD_BENCHMARKS` | `OFF` | Build fixed-work and LPfeas Metal benchmarks |
 | `MLXPDLP_ENABLE_NETLIB_REGRESSION` | `OFF` | Register the downloaded 40-case Netlib CPU/Metal regression suite |
 | `MLXPDLP_ENABLE_WARNINGS` | `ON` | Enable common compiler warnings |
@@ -368,6 +393,8 @@ and solve check (using Metal when available) is provided in
 |---|---|
 | `metal_trivial_example` | Explicit Metal trivial-LP solve and backend validation |
 | `metal_acceleration_example` | Generated fixed-work CPU/Metal smoke comparison |
+| `tiny_convergence_example` | Seven-point exact-LP convergence sweep; labeled `regression`, `smoke`, and `convergence` |
+| `netlib_convergence_example` | Netlib ADLITTLE convergence sweep against its published optimum |
 | `mlx_basic` | Basic MLX CPU operations |
 | `solver` | Analytic solver regressions |
 | `device_comparison` | Analytic LP plus duplicate-coordinate sparse regression on CPU and GPU |

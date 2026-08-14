@@ -188,17 +188,49 @@ if(MLXPDLP_BUILD_EXAMPLES)
     target_link_libraries(mlxpdlp_metal_acceleration PRIVATE mlxPDLP::solver)
     mlxpdlp_enable_warnings(mlxpdlp_metal_acceleration)
 
+    add_executable(mlxpdlp_tiny_convergence
+        examples/tiny_convergence.cpp
+    )
+    target_link_libraries(mlxpdlp_tiny_convergence PRIVATE mlxPDLP::solver)
+    mlxpdlp_enable_warnings(mlxpdlp_tiny_convergence)
+
+    if(MLXPDLP_BUILD_MPS)
+        add_executable(mlxpdlp_netlib_convergence
+            examples/netlib_convergence.cpp
+        )
+        target_compile_definitions(mlxpdlp_netlib_convergence PRIVATE
+            NETLIB_ADLITTLE_MPS="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/netlib/adlittle.mps"
+        )
+        target_link_libraries(mlxpdlp_netlib_convergence PRIVATE
+            mlxPDLP::solver
+            mlxPDLP::mps
+        )
+        mlxpdlp_enable_warnings(mlxpdlp_netlib_convergence)
+    endif()
+
     if(BUILD_TESTING)
         add_test(NAME metal_trivial_example COMMAND mlxpdlp_example)
         add_test(NAME metal_acceleration_example
             COMMAND mlxpdlp_metal_acceleration 8192 200)
+        add_test(NAME tiny_convergence_example COMMAND mlxpdlp_tiny_convergence)
         set_tests_properties(
             metal_trivial_example
             metal_acceleration_example
+            tiny_convergence_example
             PROPERTIES
                 SKIP_RETURN_CODE 77
                 TIMEOUT 120
         )
+        set_tests_properties(tiny_convergence_example PROPERTIES
+            LABELS "regression;smoke;convergence"
+        )
+        if(MLXPDLP_BUILD_MPS)
+            add_test(NAME netlib_convergence_example COMMAND mlxpdlp_netlib_convergence)
+            set_tests_properties(netlib_convergence_example PROPERTIES
+                SKIP_RETURN_CODE 77
+                TIMEOUT 180
+            )
+        endif()
     endif()
 endif()
 

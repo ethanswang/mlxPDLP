@@ -73,6 +73,8 @@ help:
 	@echo
 	@echo "After make:"
 	@echo "  ./build/mlxpdlp_example             Solve a trivial LP on Metal"
+	@echo "  ./build/mlxpdlp_tiny_convergence    Sweep an exact LP on CPU/Metal"
+	@echo "  ./build/mlxpdlp_netlib_convergence  Sweep Netlib ADLITTLE on CPU/Metal"
 	@echo "  ./build/mlxpdlp_metal_acceleration  Compare generated CPU/Metal work"
 	@echo
 	@echo "Useful variables:"

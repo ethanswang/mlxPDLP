@@ -19,6 +19,30 @@ Expected output identifies `dense-MLX-Metal-FP32`, reports a nonzero PDHG
 iteration count, and ends with `Metal solve validation: PASS`. It returns skip
 code 77 with an actionable message when MLX exposes no GPU device.
 
+## Convergence diagnostics
+
+[`tiny_convergence.cpp`](tiny_convergence.cpp) runs the exact two-variable LP
+for 10, 50, 100, 200, 500, 1,000, and 5,000 iterations on CPU FP64 and Metal
+FP32. Each table reports `||x-x*||inf`, absolute primal and dual residuals,
+absolute duality gap, and objective.
+
+[`netlib_convergence.cpp`](netlib_convergence.cpp) performs a seven-point sweep
+through 20,000 iterations on the bundled Netlib ADLITTLE MPS model. It reports
+relative residuals, relative gap, objective error against the published
+optimum, and the backend used.
+
+```sh
+./build/mlxpdlp_tiny_convergence
+./build/mlxpdlp_netlib_convergence
+# Run the exact sweep as the regression smoke test:
+ctest --test-dir build -L smoke --output-on-failure
+```
+
+Both disable presolve, feasibility polishing, host FP64 correction, and early
+termination. Their purpose is to reveal iterative convergence and the FP32
+numerical floor, not to compare speed. ADLITTLE requires
+`MLXPDLP_BUILD_MPS=ON`, which is the default.
+
 ## Self-contained acceleration comparison
 
 [`metal_acceleration.cpp`](metal_acceleration.cpp) generates a diagonally
