@@ -174,13 +174,13 @@ void print_summary(const char *label, const SolveSummary &summary) {
 
 int main(int argc, char **argv) {
     if (argc > 3) {
-        std::fprintf(stderr, "Usage: %s [SIZE=32768] [ITERATIONS=500]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s [SIZE=163840] [ITERATIONS=1000]\n", argv[0]);
         return 2;
     }
 
     try {
-        const int size = argc > 1 ? parse_positive_integer(argv[1], "size") : 32768;
-        const int iterations = argc > 2 ? parse_positive_integer(argv[2], "iterations") : 500;
+        const int size = argc > 1 ? parse_positive_integer(argv[1], "size") : 163840;
+        const int iterations = argc > 2 ? parse_positive_integer(argv[2], "iterations") : 1000;
         if (size < 4096) {
             throw std::invalid_argument(
                 "size must be at least 4096 to exercise both sparse backends");

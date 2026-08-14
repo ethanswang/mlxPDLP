@@ -138,12 +138,13 @@ mlxpdlp_result_free(result);
 See [`examples/basic.cpp`](examples/basic.cpp) for the complete copyable LP,
 backend checks, result ownership, and validation. The self-contained
 [`examples/metal_acceleration.cpp`](examples/metal_acceleration.cpp) uses a
-generated 32,768-by-32,768 CSR matrix with 2,097,152 nonzeros by default:
+generated 163,840-by-163,840 CSR matrix with 10,485,760 nonzeros and 1,000
+PDHG iterations by default:
 
 ```sh
 ./build/mlxpdlp_metal_acceleration
-# optional larger/repeated run:
-./build/mlxpdlp_metal_acceleration 65536 1000
+# optional explicit size/iteration override:
+./build/mlxpdlp_metal_acceleration 327680 2000
 ```
 
 It reports solve-only and setup-inclusive speedups. The first invocation may

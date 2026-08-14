@@ -24,12 +24,13 @@ code 77 with an actionable message when MLX exposes no GPU device.
 [`metal_acceleration.cpp`](metal_acceleration.cpp) generates a diagonally
 dominant sparse equality LP in memory. No MPS or benchmark download is needed.
 It warms CPU and Metal, then runs the same fixed number of PDHG iterations on
-Accelerate CSR FP64 and CSR Metal FP32.
+Accelerate CSR FP64 and CSR Metal FP32. The defaults are 163,840 rows and
+columns, 10,485,760 nonzeros, and 1,000 iterations per device.
 
 ```sh
 ./build/mlxpdlp_metal_acceleration
 # SIZE and ITERATIONS are optional; iterations must be a multiple of 100.
-./build/mlxpdlp_metal_acceleration 65536 1000
+./build/mlxpdlp_metal_acceleration 327680 2000
 ```
 
 The output reports both backend names, setup and synchronized solve times, and
