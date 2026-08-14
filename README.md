@@ -42,12 +42,50 @@ or the original cuPDLPx source tree.
 
 - CMake 3.25 or newer
 - A C++20 compiler
-- A separately built MLX C++ library
+- An MLX C++ library (reused when installed or supplied, otherwise obtainable
+  by the source-level `make` bootstrap)
 - PSLP 0.0.8 when `MLXPDLP_BUILD_PRESOLVE=ON` (found or fetched by CMake)
 - Zlib when `MLXPDLP_BUILD_MPS=ON`
 - macOS and Apple Silicon for the Metal path
 
-Build MLX with Metal enabled:
+## Quick start
+
+From the mlxPDLP repository root:
+
+```sh
+make
+make test
+```
+
+`make` checks the current build cache, `MLX_ROOT`, `MLX_SOURCE_DIR`, and
+`MLX_BUILD_DIR`, followed by normal CMake search locations. If none identify a
+usable MLX C++ library, it asks for approval before accessing the network. On
+approval it downloads the MLX revision tested by mlxPDLP, builds it with Metal
+enabled, and installs it privately under `_deps/`; it does not modify a system
+prefix. The same `make` invocation then configures and builds mlxPDLP. Later
+invocations reuse the private install without prompting.
+
+For a noninteractive build, the opt-in itself records approval:
+
+```sh
+make MLXPDLP_FETCH_MLX=ON
+```
+
+To forbid the MLX fallback download, or to select an existing build explicitly:
+
+```sh
+make MLXPDLP_FETCH_MLX=OFF \
+  MLX_SOURCE_DIR=/absolute/path/to/mlx \
+  MLX_BUILD_DIR=/absolute/path/to/mlx/build
+```
+
+An installed MLX prefix can be selected with `MLX_ROOT=/absolute/prefix`.
+Pass extra project options through `CMAKE_ARGS`, for example
+`make CMAKE_ARGS='-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF'`.
+
+### Manual CMake workflow
+
+The bootstrap is optional. To build MLX separately with Metal enabled:
 
 ```sh
 cmake -S /path/to/mlx -B /path/to/mlx/build \
@@ -57,9 +95,7 @@ cmake -S /path/to/mlx -B /path/to/mlx/build \
 cmake --build /path/to/mlx/build --parallel
 ```
 
-## Quick start
-
-From the mlxPDLP repository root:
+Then configure mlxPDLP directly:
 
 ```sh
 cmake -S . -B build \
@@ -78,6 +114,10 @@ cmake -S . -B build \
 ```
 
 The GPU tests use CTest skip code 77 when MLX exposes no GPU device.
+
+The managed dependency revision and repository can be overridden for testing
+with `MLXPDLP_MLX_REVISION` and `MLXPDLP_MLX_REPOSITORY`. Such overrides are
+not part of the tested dependency combination.
 
 ### Build options
 

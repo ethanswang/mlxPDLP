@@ -85,7 +85,8 @@ dependencies are:
 
 - CMake 3.25 or newer;
 - a C++20 compiler;
-- a separately built MLX C++ library;
+- an MLX C++ library, either supplied by the user or privately bootstrapped by
+  the source-level Makefile after explicit approval;
 - PSLP 0.0.8 when `MLXPDLP_BUILD_PRESOLVE=ON`;
 - Zlib when the bundled MPS parser is enabled;
 - Foundation, Metal, MetalKit, and Accelerate on macOS.
@@ -100,7 +101,24 @@ When `MLX_BUILD_DIR` is supplied, its parent is also searched for MLX source
 headers. The selected build's `CMakeCache.txt` is inspected to report whether
 `MLX_BUILD_METAL=ON`.
 
+The source-level `make` entry point probes those hints, an existing mlxPDLP
+build cache, and normal CMake search paths before any network operation. If no
+usable MLX library is found, interactive builds ask for approval; noninteractive
+builds require `MLXPDLP_FETCH_MLX=ON`. The approved path checks out the MLX
+revision tested in CI, disables MLX tests/examples/benchmarks/Python and unused
+file-format backends, builds the static CPU/Metal library, and installs it under
+`_deps/mlx-install`. Source, build, and install trees remain separate so the
+normal `FindMLX.cmake` path is exercised. `MLXPDLP_FETCH_MLX=OFF` guarantees
+that this bootstrap performs no download.
+
 ### Configure, build, and test
+
+```sh
+make
+make test
+```
+
+Equivalent direct CMake commands are:
 
 ```sh
 cmake -S . -B build \

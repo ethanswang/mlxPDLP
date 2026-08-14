@@ -13,16 +13,26 @@ Thanks for helping improve mlxPDLP.
 
 ## Development setup
 
-Build MLX separately, then configure mlxPDLP:
+The source-level Makefile reuses an existing MLX dependency or asks before
+downloading, building, and privately installing the tested revision:
 
 ```sh
-cmake -S . -B build \
-  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
+make
+make test
 ```
 
-Or use the checked-in presets:
+For a separately built MLX, provide its paths and prohibit fallback downloads:
+
+```sh
+make MLXPDLP_FETCH_MLX=OFF \
+  MLX_SOURCE_DIR=/absolute/path/to/mlx \
+  MLX_BUILD_DIR=/absolute/path/to/mlx/build
+make test MLXPDLP_FETCH_MLX=OFF \
+  MLX_SOURCE_DIR=/absolute/path/to/mlx \
+  MLX_BUILD_DIR=/absolute/path/to/mlx/build
+```
+
+The direct CMake workflow and checked-in presets remain available:
 
 ```sh
 export MLX_BUILD_DIR=/absolute/path/to/mlx/build

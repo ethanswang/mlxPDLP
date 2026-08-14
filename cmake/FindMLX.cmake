@@ -89,11 +89,13 @@ set(_MLX_REQUIRED_VARS
     MLX_LIBRARY
     MLX_INCLUDE_DIR
     MLX_GENERATED_INCLUDE_DIR
-    MLX_JSON_INCLUDE_DIR
-    MLX_FMT_INCLUDE_DIR
 )
 set(_MLX_PLATFORM_LIBRARIES)
-if(APPLE)
+# Script-mode callers use this module only as a lightweight dependency probe;
+# CMake has not enabled a language or selected an SDK there, so framework
+# lookup is not meaningful. The real project configure validates and links the
+# required Apple frameworks below.
+if(APPLE AND NOT CMAKE_SCRIPT_MODE_FILE)
     find_library(MLX_FOUNDATION_FRAMEWORK Foundation)
     find_library(MLX_METAL_FRAMEWORK Metal)
     find_library(MLX_METALKIT_FRAMEWORK MetalKit)
@@ -140,12 +142,24 @@ foreach(_MLX_BUILD_METADATA_DIR IN LISTS _MLX_BUILD_METADATA_DIRS)
     endif()
 endforeach()
 
-if(MLX_FOUND AND NOT TARGET MLX::MLX)
+if(MLX_FOUND AND NOT CMAKE_SCRIPT_MODE_FILE AND NOT TARGET MLX::MLX)
+    set(_MLX_INTERFACE_INCLUDE_DIRS
+        "${MLX_INCLUDE_DIR}"
+        "${MLX_GENERATED_INCLUDE_DIR}"
+    )
+    # MLX uses json and fmt while building its library, but current installed
+    # public headers do not require them. Preserve their include directories
+    # for source/build-tree layouts without rejecting a proper MLX install.
+    if(MLX_JSON_INCLUDE_DIR)
+        list(APPEND _MLX_INTERFACE_INCLUDE_DIRS "${MLX_JSON_INCLUDE_DIR}")
+    endif()
+    if(MLX_FMT_INCLUDE_DIR)
+        list(APPEND _MLX_INTERFACE_INCLUDE_DIRS "${MLX_FMT_INCLUDE_DIR}")
+    endif()
     add_library(MLX::MLX UNKNOWN IMPORTED)
     set_target_properties(MLX::MLX PROPERTIES
         IMPORTED_LOCATION "${MLX_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES
-            "${MLX_INCLUDE_DIR};${MLX_GENERATED_INCLUDE_DIR};${MLX_JSON_INCLUDE_DIR};${MLX_FMT_INCLUDE_DIR}"
+        INTERFACE_INCLUDE_DIRECTORIES "${_MLX_INTERFACE_INCLUDE_DIRS}"
         INTERFACE_LINK_LIBRARIES "${_MLX_PLATFORM_LIBRARIES}"
     )
 endif()
