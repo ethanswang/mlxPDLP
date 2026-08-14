@@ -36,7 +36,7 @@ macos_deployment_target=
 managed_macos_deployment_target=
 if [ "$(uname -s)" = Darwin ]; then
     macos_deployment_target=${MLXPDLP_MACOS_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET:-}}
-    managed_macos_deployment_target=${macos_deployment_target:-26.2}
+    managed_macos_deployment_target=${macos_deployment_target:-14.0}
 fi
 
 [ -n "$source_dir" ] || fail "MLXPDLP_SOURCE_DIR is not set"

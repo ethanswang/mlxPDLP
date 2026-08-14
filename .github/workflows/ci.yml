@@ -17,8 +17,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     env:
-      # The macOS 15 runner must execute the binaries; this also exercises the
-      # documented compatibility target instead of the local 26.2 default.
+      # Keep dependency caches and the offline configure on the repo default.
       MLXPDLP_MACOS_DEPLOYMENT_TARGET: "14.0"
 
     steps:

@@ -216,7 +216,7 @@ env \
 assert_contains "$case_dir/output" "recovering the managed MLX source directory"
 assert_contains "$case_dir/output" "recovering an interrupted MLX download"
 assert_contains "$cmake_log" "$case_dir/deps/mlx-build --parallel 3"
-assert_contains "$cmake_log" "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=26.2"
+assert_contains "$cmake_log" "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=14.0"
 
 new_case stale_target
 mkdir -p \
@@ -259,7 +259,7 @@ env \
     MLXPDLP_SOURCE_DIR="$source_dir" \
     sh "$bootstrap" > "$case_dir/output" 2>&1
 assert_contains "$case_dir/output" "configuring MLX"
-[ "$(sed -n '3p' "$case_dir/deps/mlx-install/.mlxpdlp-managed-mlx")" = 26.2 ] ||
+[ "$(sed -n '3p' "$case_dir/deps/mlx-install/.mlxpdlp-managed-mlx")" = 14.0 ] ||
     fail "managed MLX metadata did not record the deployment target"
 
 new_case make_parallel
@@ -275,15 +275,15 @@ env \
     MLXPDLP_BUILD_DIR="$case_dir/build" \
     MLXPDLP_DEPS_DIR="$case_dir/deps" \
     MLXPDLP_FETCH_DEPS=ON \
-    MLXPDLP_MACOS_DEPLOYMENT_TARGET=14.0 \
+    MLXPDLP_MACOS_DEPLOYMENT_TARGET=26.2 \
     MLXPDLP_MAKE_PARALLEL_LEVEL=12 \
     MLXPDLP_MLX_REVISION="$revision" \
     MLXPDLP_SOURCE_DIR="$source_dir" \
     sh "$bootstrap" > "$case_dir/output" 2>&1
 assert_contains "$case_dir/output" "building MLX with 12 parallel jobs"
 assert_contains "$cmake_log" "$case_dir/deps/mlx-build --parallel 12"
-assert_contains "$cmake_log" "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=14.0"
-assert_not_contains "$cmake_log" "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=26.2"
+assert_contains "$cmake_log" "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=26.2"
+assert_not_contains "$cmake_log" "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=14.0"
 
 new_case conflict
 if env \

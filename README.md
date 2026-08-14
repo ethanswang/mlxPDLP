@@ -86,20 +86,12 @@ CPU count and passes it into both the MLX and mlxPDLP CMake builds.
 three regardless of local Make flags.
 
 On macOS, the bootstrap builds MLX and mlxPDLP with the same deployment target
-(`26.2` by default). This allows newer MLX Metal paths when the installed SDK
-and toolchain support them, while avoiding linker warnings caused when MLX
-records the host macOS patch release but mlxPDLP uses the SDK baseline.
+(`14.0` by default), the oldest target supported by the pinned MLX revision.
+This avoids linker warnings caused when MLX records the host macOS patch
+release but mlxPDLP uses the SDK baseline.
 Override both builds with `MLXPDLP_MACOS_DEPLOYMENT_TARGET=N`; an existing
 `MACOSX_DEPLOYMENT_TARGET` environment value is also respected. Changing the
 target automatically rebuilds a managed MLX install.
-
-The default requires macOS 26.2 or newer. To build a portable binary for the
-oldest macOS release supported by this MLX revision, lower both targets to
-14.0:
-
-```sh
-make MLXPDLP_MACOS_DEPLOYMENT_TARGET=14.0
-```
 
 For a noninteractive build, the opt-in itself records approval:
 
@@ -207,7 +199,7 @@ The bootstrap is optional. To build MLX separately with Metal enabled:
 
 ```sh
 cmake -S /path/to/mlx -B /path/to/mlx/build \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.2 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
   -DMLX_BUILD_METAL=ON \
   -DMLX_BUILD_TESTS=OFF \
   -DMLX_BUILD_EXAMPLES=OFF
@@ -218,7 +210,7 @@ Then configure mlxPDLP directly:
 
 ```sh
 cmake -S . -B build \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=26.2 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
   -DMLX_BUILD_DIR=/absolute/path/to/mlx/build \
   -DMLXPDLP_ALLOW_DOWNLOADS=ON
 cmake --build build --parallel

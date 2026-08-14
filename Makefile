@@ -104,7 +104,7 @@ help:
 	@echo "  MLXPDLP_MLX_CMAKE_ARGS='-D...' Extra managed-MLX configure arguments"
 	@echo "  MLXPDLP_MACOS_DEPLOYMENT_TARGET=N"
 	@echo "                                  macOS target for managed MLX and mlxPDLP"
-	@echo "                                  (managed-build default: 26.2)"
+	@echo "                                  (managed-build default: 14.0)"
 	@echo "  BUILD_DIR=/path               mlxPDLP build directory (default: build)"
 	@echo "  CMAKE_ARGS='-D...'            Extra mlxPDLP configure arguments"
 	@echo "  CMAKE_BUILD_PARALLEL_LEVEL=N  Explicit compile-job override"
