@@ -18,6 +18,7 @@ CMAKE ?= cmake
 CTEST ?= ctest
 BUILD_DIR ?= build
 CMAKE_ARGS ?=
+MLXPDLP_MACOS_DEPLOYMENT_TARGET ?=
 # GNU Make 3.81 finishes populating MAKEFLAGS only after reading this file, so
 # these variables stay recursively expanded until a recipe is launched.
 MLXPDLP_MAKE_PARALLEL = $(strip \
@@ -59,6 +60,7 @@ export MLXPDLP_DEPS_DIR
 export MLXPDLP_FETCH_DEPS
 export MLXPDLP_FETCH_MLX
 export MLXPDLP_MAKE_PARALLEL_LEVEL
+export MLXPDLP_MACOS_DEPLOYMENT_TARGET
 export MLXPDLP_MLX_CMAKE_ARGS
 export MLXPDLP_MLX_REPOSITORY
 export MLXPDLP_MLX_REVISION
@@ -100,6 +102,9 @@ help:
 	@echo "                                  (default: ask)"
 	@echo "  MLXPDLP_FETCH_MLX=...          Deprecated alias for FETCH_DEPS"
 	@echo "  MLXPDLP_MLX_CMAKE_ARGS='-D...' Extra managed-MLX configure arguments"
+	@echo "  MLXPDLP_MACOS_DEPLOYMENT_TARGET=N"
+	@echo "                                  macOS target for managed MLX and mlxPDLP"
+	@echo "                                  (managed-build default: 26.2)"
 	@echo "  BUILD_DIR=/path               mlxPDLP build directory (default: build)"
 	@echo "  CMAKE_ARGS='-D...'            Extra mlxPDLP configure arguments"
 	@echo "  CMAKE_BUILD_PARALLEL_LEVEL=N  Explicit compile-job override"

@@ -33,12 +33,12 @@ fail() {
 }
 
 assert_contains() {
-    grep -F "$2" "$1" >/dev/null 2>&1 ||
+    grep -F -- "$2" "$1" >/dev/null 2>&1 ||
         fail "$1 does not contain: $2"
 }
 
 assert_not_contains() {
-    if grep -F "$2" "$1" >/dev/null 2>&1; then
+    if grep -F -- "$2" "$1" >/dev/null 2>&1; then
         fail "$1 unexpectedly contains: $2"
     fi
 }
@@ -216,6 +216,51 @@ env \
 assert_contains "$case_dir/output" "recovering the managed MLX source directory"
 assert_contains "$case_dir/output" "recovering an interrupted MLX download"
 assert_contains "$cmake_log" "$case_dir/deps/mlx-build --parallel 3"
+assert_contains "$cmake_log" "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=26.2"
+
+new_case stale_target
+mkdir -p \
+    "$case_dir/build" \
+    "$case_dir/deps/mlx/mlx" \
+    "$case_dir/deps/mlx-install/include/mlx" \
+    "$case_dir/deps/mlx-install/lib"
+: > "$case_dir/deps/mlx/CMakeLists.txt"
+: > "$case_dir/deps/mlx/mlx/mlx.h"
+printf '%s\n' "$revision" > "$case_dir/deps/mlx/.fake-head"
+: > "$case_dir/deps/mlx-install/.fake-installed"
+: > "$case_dir/deps/mlx-install/include/mlx/mlx.h"
+: > "$case_dir/deps/mlx-install/include/mlx/version.h"
+: > "$case_dir/deps/mlx-install/lib/libmlx.a"
+{
+    printf '%s\n' "https://github.com/ml-explore/mlx.git"
+    printf '%s\n' "$revision"
+} > "$case_dir/deps/mlx-install/.mlxpdlp-managed-mlx"
+{
+    printf 'MLX_LIBRARY:FILEPATH=%s\n' \
+        "$case_dir/deps/mlx-install/lib/libmlx.a"
+    printf 'MLX_INCLUDE_DIR:PATH=%s\n' \
+        "$case_dir/deps/mlx-install/include"
+    printf 'MLX_GENERATED_INCLUDE_DIR:PATH=%s\n' \
+        "$case_dir/deps/mlx-install/include"
+} > "$case_dir/build/CMakeCache.txt"
+env \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    FAKE_CMAKE_LOG="$cmake_log" \
+    FAKE_GIT_LOG="$git_log" \
+    FAKE_MLX_AVAILABLE=no \
+    FAKE_MLX_REVISION="$revision" \
+    FAKE_POLICY_LOG="$policy_log" \
+    FAKE_PSLP_MISSING=no \
+    FAKE_SOURCE_DIR="$source_dir" \
+    MLXPDLP_BUILD_DIR="$case_dir/build" \
+    MLXPDLP_DEPS_DIR="$case_dir/deps" \
+    MLXPDLP_FETCH_DEPS=ON \
+    MLXPDLP_MLX_REVISION="$revision" \
+    MLXPDLP_SOURCE_DIR="$source_dir" \
+    sh "$bootstrap" > "$case_dir/output" 2>&1
+assert_contains "$case_dir/output" "configuring MLX"
+[ "$(sed -n '3p' "$case_dir/deps/mlx-install/.mlxpdlp-managed-mlx")" = 26.2 ] ||
+    fail "managed MLX metadata did not record the deployment target"
 
 new_case make_parallel
 env \
@@ -230,12 +275,15 @@ env \
     MLXPDLP_BUILD_DIR="$case_dir/build" \
     MLXPDLP_DEPS_DIR="$case_dir/deps" \
     MLXPDLP_FETCH_DEPS=ON \
+    MLXPDLP_MACOS_DEPLOYMENT_TARGET=14.0 \
     MLXPDLP_MAKE_PARALLEL_LEVEL=12 \
     MLXPDLP_MLX_REVISION="$revision" \
     MLXPDLP_SOURCE_DIR="$source_dir" \
     sh "$bootstrap" > "$case_dir/output" 2>&1
 assert_contains "$case_dir/output" "building MLX with 12 parallel jobs"
 assert_contains "$cmake_log" "$case_dir/deps/mlx-build --parallel 12"
+assert_contains "$cmake_log" "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=14.0"
+assert_not_contains "$cmake_log" "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=26.2"
 
 new_case conflict
 if env \

@@ -32,6 +32,12 @@ mlx_repository=${MLXPDLP_MLX_REPOSITORY:-https://github.com/ml-explore/mlx.git}
 mlx_revision=${MLXPDLP_MLX_REVISION:-25616a0a6acf78a6e23379a0ffcdc3296775a468}
 pslp_repository=https://github.com/dance858/PSLP.git
 pslp_revision=v0.0.8
+macos_deployment_target=
+managed_macos_deployment_target=
+if [ "$(uname -s)" = Darwin ]; then
+    macos_deployment_target=${MLXPDLP_MACOS_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET:-}}
+    managed_macos_deployment_target=${macos_deployment_target:-26.2}
+fi
 
 [ -n "$source_dir" ] || fail "MLXPDLP_SOURCE_DIR is not set"
 [ -n "$build_dir" ] || build_dir="$source_dir/build"
@@ -128,17 +134,42 @@ cache_value() {
     sed -n "s/^$1:[^=]*=//p" "$build_dir/CMakeCache.txt"
 }
 
+managed_source_dir="$deps_dir/mlx"
+managed_build_dir="$deps_dir/mlx-build"
+managed_root="$deps_dir/mlx-install"
+managed_metadata="$managed_root/.mlxpdlp-managed-mlx"
+managed_selected=no
+
+managed_metadata_matches() {
+    [ -f "$managed_metadata" ] &&
+        [ "$(sed -n '1p' "$managed_metadata")" = "$mlx_repository" ] &&
+        [ "$(sed -n '2p' "$managed_metadata")" = "$mlx_revision" ] &&
+        [ "$(sed -n '3p' "$managed_metadata")" = "$managed_macos_deployment_target" ]
+}
+
 have_mlx=no
 reuse_cache=no
 if [ "$explicit_hints" = no ] && [ -f "$build_dir/CMakeCache.txt" ]; then
     cached_library=$(cache_value MLX_LIBRARY)
     cached_include=$(cache_value MLX_INCLUDE_DIR)
     cached_generated_include=$(cache_value MLX_GENERATED_INCLUDE_DIR)
-    if [ -f "$cached_library" ] &&
+    cached_managed_metadata_valid=yes
+    case "$cached_library" in
+        "$managed_root"/*)
+            if ! managed_metadata_matches; then
+                cached_managed_metadata_valid=no
+            fi
+            ;;
+    esac
+    if [ "$cached_managed_metadata_valid" = yes ] &&
+       [ -f "$cached_library" ] &&
        [ -f "$cached_include/mlx/mlx.h" ] &&
        [ -f "$cached_generated_include/mlx/version.h" ]; then
         have_mlx=yes
         reuse_cache=yes
+        case "$cached_library" in
+            "$managed_root"/*) managed_selected=yes ;;
+        esac
     fi
 fi
 
@@ -147,18 +178,8 @@ if [ "$have_mlx" = no ] &&
     have_mlx=yes
 fi
 
-managed_source_dir="$deps_dir/mlx"
-managed_build_dir="$deps_dir/mlx-build"
-managed_root="$deps_dir/mlx-install"
-managed_metadata="$managed_root/.mlxpdlp-managed-mlx"
-managed_selected=no
-
-if [ "$have_mlx" = no ] && [ -f "$managed_metadata" ]; then
-    managed_repository=$(sed -n '1p' "$managed_metadata")
-    managed_revision=$(sed -n '2p' "$managed_metadata")
-    if [ "$managed_repository" = "$mlx_repository" ] &&
-       [ "$managed_revision" = "$mlx_revision" ] &&
-       mlx_available "$managed_root" "" ""; then
+if [ "$have_mlx" = no ] && managed_metadata_matches; then
+    if mlx_available "$managed_root" "" ""; then
         mlx_root=$managed_root
         mlx_source_dir=$managed_source_dir
         mlx_build_dir=$managed_build_dir
@@ -249,6 +270,10 @@ if [ "$have_mlx" = no ]; then
         set -- "$@" $MLXPDLP_MLX_CMAKE_ARGS
         set +f
     fi
+    if [ -n "$managed_macos_deployment_target" ]; then
+        set -- "$@" \
+            "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=$managed_macos_deployment_target"
+    fi
     "$@"
 
     printf 'mlxPDLP: building MLX with %s parallel jobs\n' \
@@ -267,6 +292,7 @@ if [ "$have_mlx" = no ]; then
     {
         printf '%s\n' "$mlx_repository"
         printf '%s\n' "$mlx_revision"
+        printf '%s\n' "$managed_macos_deployment_target"
     } > "$managed_metadata"
 
     mlx_root=$managed_root
@@ -287,6 +313,10 @@ fi
 
 configure_project() {
     allow_downloads=$1
+    project_macos_deployment_target=$macos_deployment_target
+    if [ "$managed_selected" = yes ]; then
+        project_macos_deployment_target=$managed_macos_deployment_target
+    fi
     set -- "$cmake_command" -S "$source_dir" -B "$build_dir"
     [ -z "$mlx_root" ] || set -- "$@" "-DMLX_ROOT:PATH=$mlx_root"
     [ -z "$mlx_source_dir" ] || set -- "$@" "-DMLX_SOURCE_DIR:PATH=$mlx_source_dir"
@@ -300,6 +330,11 @@ configure_project() {
         # shellcheck disable=SC2086
         set -- "$@" $CMAKE_ARGS
         set +f
+    fi
+
+    if [ -n "$project_macos_deployment_target" ]; then
+        set -- "$@" \
+            "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=$project_macos_deployment_target"
     fi
 
     # Append the consent decision after CMAKE_ARGS and pass it every time. A

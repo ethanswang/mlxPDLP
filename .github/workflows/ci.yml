@@ -16,6 +16,10 @@ jobs:
     name: macOS build, test, and package (CPU + Metal)
     runs-on: macos-15
     timeout-minutes: 90
+    env:
+      # The macOS 15 runner must execute the binaries; this also exercises the
+      # documented compatibility target instead of the local 26.2 default.
+      MLXPDLP_MACOS_DEPLOYMENT_TARGET: "14.0"
 
     steps:
       - name: Check out mlxPDLP
@@ -37,7 +41,7 @@ jobs:
             _deps/mlx-install
             build/_deps/pslp-src
             build/_deps/pslp-build
-          key: native-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.key }}-mlx-25616a0a6acf-pslp-0.0.8-v1
+          key: native-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.key }}-mlx-25616a0a6acf-pslp-0.0.8-macos-${{ env.MLXPDLP_MACOS_DEPLOYMENT_TARGET }}-v2
 
       - name: Bootstrap native dependencies on cache miss
         if: steps.native-deps.outputs.cache-hit != 'true'
@@ -67,6 +71,7 @@ jobs:
           -S .
           -B build
           -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.MLXPDLP_MACOS_DEPLOYMENT_TARGET }}
           -DMLX_ROOT=${{ github.workspace }}/_deps/mlx-install
           -DMLX_SOURCE_DIR=${{ github.workspace }}/_deps/mlx
           -DMLX_BUILD_DIR=${{ github.workspace }}/_deps/mlx-build

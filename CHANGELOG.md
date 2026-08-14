@@ -67,6 +67,9 @@ and the project intends to follow
 
 ### Fixed
 
+- Build managed MLX and mlxPDLP with one macOS deployment target, defaulting to
+  26.2 with a documented 14.0 compatibility override, and invalidate stale
+  managed archives instead of mixing deployment targets at link time.
 - Bound managed MLX compilation to a configurable number of jobs so cache-miss
   builds do not overload GitHub's hosted macOS runner and time out.
 - Correct primal-only FP32 near misses with a safeguarded host-FP64 descent on
