@@ -61,7 +61,9 @@ loader uses globally visible `mlxpdlp_`-prefixed names.
 | `src/mps_loader.c` | Ownership adapter from the parser to `mlxpdlp_mps_problem_t` |
 | `src/mps_parser.c` | Bundled MPS parser |
 | `src/mps_parser_internal.h` | Private parser types and allocation declarations |
-| `examples/basic.cpp` | Small standalone solver demonstration |
+| `examples/basic.cpp` | Explicit Metal trivial-LP solve and validation |
+| `examples/metal_acceleration.cpp` | Generated sparse fixed-work CPU/Metal comparison |
+| `examples/installed_consumer` | Downstream `find_package` link-and-solve check |
 | `tests/test_mlx_basic.cpp` | Basic MLX CPU diagnostic |
 | `tests/test_solver.cpp` | Solver regression tests |
 | `tests/test_device_comparison.cpp` | Analytic and sparse duplicate-coordinate CPU/GPU comparison |
@@ -74,7 +76,6 @@ loader uses globally visible `mlxpdlp_`-prefixed names.
 | `benchmarks/data/netlib` | Larger PILOT87 benchmark and provenance |
 | `cmake/FindMLX.cmake` | MLX source/build/install discovery |
 | `cmake/mlxPDLPConfig.cmake.in` | Installed CMake package configuration |
-| `examples/installed_consumer` | Downstream `find_package` link check |
 
 ## Standalone build and installation
 
@@ -152,7 +153,7 @@ Available build options:
 | `BUILD_TESTING` | `ON` | Builds and registers the available CTest targets |
 | `MLXPDLP_BUILD_PRESOLVE` | `ON` | Enables PSLP 0.0.8 presolve/postsolve support |
 | `MLXPDLP_BUILD_MPS` | `ON` | Builds the bundled MPS loader and requires Zlib |
-| `MLXPDLP_BUILD_EXAMPLES` | `ON` | Builds `mlxpdlp_example` |
+| `MLXPDLP_BUILD_EXAMPLES` | `ON` | Builds the trivial Metal and acceleration examples |
 | `MLXPDLP_BUILD_BENCHMARKS` | `OFF` | Builds fixed-work and LPfeas Metal benchmarks |
 | `MLXPDLP_ENABLE_WARNINGS` | `ON` | Enables common compiler warnings |
 | `MLXPDLP_ALLOW_DOWNLOADS` | `OFF` | Allows direct CMake to fetch missing PSLP source |
@@ -852,6 +853,8 @@ CTest registers:
 | Test | Coverage |
 |---|---|
 | `bootstrap_dependency_policy` | Unified consent, offline enforcement, and interrupted-checkout recovery |
+| `metal_trivial_example` | Explicit Metal device selection and trivial-LP validation |
+| `metal_acceleration_example` | Generated sparse CPU/Metal fixed-work smoke comparison |
 | `mlx_basic` | Basic MLX CPU array operations |
 | `solver` | Solver, warm-start, presolve, postsolve, and termination regressions |
 | `device_comparison` | Analytic LP and duplicate-coordinate sparse LP on CPU and GPU |

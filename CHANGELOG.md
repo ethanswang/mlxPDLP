@@ -16,6 +16,8 @@ and the project intends to follow
 - One download-consent policy for MLX, PSLP, and MLX's transitive CMake
   dependencies, with strict offline enforcement, direct-CMake opt-in, and
   automatic recovery from interrupted managed MLX checkouts.
+- User-facing C++ Metal examples: an explicit, validated trivial-LP solve and a
+  self-contained generated sparse CPU/Metal fixed-work acceleration comparison.
 - Python bindings (nanobind + scikit-build-core) under `python/` with
   NumPy CSR input, PSLP presolve, warm starts, MPS loading, CPU
   float64 and Metal float32 device selection, and a small Netlib

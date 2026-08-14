@@ -55,8 +55,18 @@ From the mlxPDLP repository root:
 
 ```sh
 make
+./build/mlxpdlp_example
+./build/mlxpdlp_metal_acceleration
 make test
 ```
+
+The first executable solves and validates a two-variable LP explicitly on
+`mx::Device::gpu`; its output confirms the Metal FP32 backend and the number of
+PDHG iterations. The second generates a larger sparse LP in memory, warms both
+devices, and times identical fixed work on Accelerate CPU FP64 and Metal FP32.
+It needs no downloaded model data. A tiny LP proves API correctness but cannot
+show acceleration because GPU launch overhead dominates, so the two concerns
+are intentionally separate.
 
 `make` checks the current build cache, `MLX_ROOT`, `MLX_SOURCE_DIR`, and
 `MLX_BUILD_DIR`, followed by normal CMake search locations. It first attempts
@@ -94,6 +104,54 @@ MLX prefix can be selected with `MLX_ROOT=/absolute/prefix`.
 `MLXPDLP_FETCH_DEPS`. If both are supplied, their normalized values must agree.
 Pass extra project options through `CMAKE_ARGS`, for example
 `make CMAKE_ARGS='-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF'`.
+
+### C++ Metal examples
+
+The essential device selection in the trivial example is explicit:
+
+```cpp
+#include <mlxPDLP/solver.h>
+
+using namespace mlxpdlp;
+
+pdhg_parameters_t parameters;
+mlxpdlp_set_default_parameters(&parameters);
+parameters.presolve = false; // ensure this tiny LP reaches PDHG
+
+if (!mx::is_available(mx::Device::gpu)) {
+    // MLX was not built with an available Metal backend.
+}
+
+MlxPdlpSolver solver(
+    num_variables, num_constraints,
+    row_ptr, col_ind, values,
+    variable_lb, variable_ub,
+    constraint_lb, constraint_ub,
+    objective, 0.0, &parameters,
+    mx::Device::gpu);
+
+auto *result = solver.solve();
+mx::synchronize(solver.state().stream);
+mlxpdlp_result_free(result);
+```
+
+See [`examples/basic.cpp`](examples/basic.cpp) for the complete copyable LP,
+backend checks, result ownership, and validation. The self-contained
+[`examples/metal_acceleration.cpp`](examples/metal_acceleration.cpp) uses a
+generated 32,768-by-32,768 CSR matrix with 2,097,152 nonzeros by default:
+
+```sh
+./build/mlxpdlp_metal_acceleration
+# optional larger/repeated run:
+./build/mlxpdlp_metal_acceleration 65536 1000
+```
+
+It reports solve-only and setup-inclusive speedups. The first invocation may
+spend additional time compiling MLX Metal kernels; warmup is excluded from the
+reported comparison. Results depend on the Mac model and power state, and the
+comparison is equal PDHG work rather than an accuracy claim because CPU uses
+FP64 while Metal uses FP32. See [`examples/README.md`](examples/README.md) for
+the example map.
 
 ### Manual CMake workflow
 
@@ -146,7 +204,7 @@ not part of the tested dependency combination.
 | `BUILD_TESTING` | `ON` | Build the regression and device tests |
 | `MLXPDLP_BUILD_PRESOLVE` | `ON` | Build PSLP 0.0.8 presolve/postsolve support |
 | `MLXPDLP_BUILD_MPS` | `ON` | Build the bundled MPS loader |
-| `MLXPDLP_BUILD_EXAMPLES` | `ON` | Build the basic example |
+| `MLXPDLP_BUILD_EXAMPLES` | `ON` | Build the trivial Metal and acceleration examples |
 | `MLXPDLP_BUILD_BENCHMARKS` | `OFF` | Build fixed-work and LPfeas Metal benchmarks |
 | `MLXPDLP_ENABLE_NETLIB_REGRESSION` | `OFF` | Register the downloaded 40-case Netlib CPU/Metal regression suite |
 | `MLXPDLP_ENABLE_WARNINGS` | `ON` | Enable common compiler warnings |
@@ -300,13 +358,15 @@ target_link_libraries(my_solver PRIVATE mlxPDLP::solver)
 
 Pass `MLX_BUILD_DIR`, `MLX_SOURCE_DIR`, or `MLX_ROOT` when configuring the
 downstream project so the installed package can locate MLX. A complete link
-check is provided in
+and solve check (using Metal when available) is provided in
 [`examples/installed_consumer`](examples/installed_consumer).
 
 ## Tests
 
 | CTest name | Coverage |
 |---|---|
+| `metal_trivial_example` | Explicit Metal trivial-LP solve and backend validation |
+| `metal_acceleration_example` | Generated fixed-work CPU/Metal smoke comparison |
 | `mlx_basic` | Basic MLX CPU operations |
 | `solver` | Analytic solver regressions |
 | `device_comparison` | Analytic LP plus duplicate-coordinate sparse regression on CPU and GPU |

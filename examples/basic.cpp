@@ -23,13 +23,15 @@ limitations under the License.
 
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <exception>
+#include <memory>
+#include <stdexcept>
 
 using namespace mlxpdlp;
 
 // ---------------------------------------------------------------------------
-// Test LP: same as test/test_basic.py
+// Trivial Metal correctness example. This problem is intentionally too small
+// to benchmark a GPU; see metal_acceleration.cpp for a fixed-work comparison.
 //
 //   minimize  x0 + x1
 //   s.t.     1*x0 + 2*x1 = 5    (row 0: l=5, u=5)
@@ -41,8 +43,14 @@ using namespace mlxpdlp;
 // ---------------------------------------------------------------------------
 
 int main() {
-    printf("mlxPDLP — Demo\n");
-    printf("===========================\n\n");
+    std::printf("mlxPDLP C++ Metal example\n");
+    std::printf("==========================\n\n");
+
+    if (!mx::is_available(mx::Device::gpu)) {
+        std::printf("SKIPPED: MLX reports no Metal GPU device.\n");
+        std::printf("Build MLX with MLX_BUILD_METAL=ON on Apple Silicon.\n");
+        return 77;
+    }
 
     // Build LP in CSR format
     int m = 3; // constraints
@@ -62,71 +70,64 @@ int main() {
     // Set up parameters (verbose for demo)
     pdhg_parameters_t params;
     mlxpdlp_set_default_parameters(&params);
-    params.verbose = true;
+    // Disable host presolve/correction so this tiny LP demonstrably executes
+    // the PDHG iterations on the requested Metal device.
+    params.verbose = false;
+    params.presolve = false;
+    params.feasibility_polishing = false;
+    params.host_double_polishing = false;
     params.termination_evaluation_frequency = 50; // smaller blocks for small problem
-    params.termination_criteria.eps_optimal_relative = 1e-6;
-    params.termination_criteria.eps_feasible_relative = 1e-6;
+    params.termination_criteria.eps_optimal_relative = 1e-4;
+    params.termination_criteria.eps_feasible_relative = 1e-4;
     params.sv_max_iter = 1000;
     params.sv_tol = 1e-6;
 
-    printf("Problem: %d variables, %d constraints\n", n, m);
-    printf("A = [[1,2],[0,1],[3,2]] (CSR, nnz=6)\n");
-    printf("Expected: x=[1.0, 2.0], y=[1.0, -1.0, 0.0], obj=3.0\n\n");
+    std::printf("Problem: %d variables, %d constraints, 6 nonzeros\n", n, m);
+    std::printf("Expected: x=[1, 2], objective=3\n");
+    std::printf("Requested device: mx::Device::gpu (Apple Metal)\n\n");
 
-    // Create solver
-    MlxPdlpSolver solver(n, m, row_ptr, col_ind, vals, var_lb, var_ub, con_lb, con_ub, obj, 0.0,
-                         &params);
+    try {
+        MlxPdlpSolver solver(n, m, row_ptr, col_ind, vals, var_lb, var_ub, con_lb, con_ub, obj, 0.0,
+                             &params, mx::Device::gpu);
+        const auto &state = solver.state();
+        if (state.stream.device != mx::Device::gpu || state.cpu_double_precision_active ||
+            state.obj.dtype() != mx::float32) {
+            throw std::runtime_error("solver did not retain the requested Metal FP32 device");
+        }
 
-    // Solve
-    mlxpdlp_result_t *result = solver.solve();
+        std::unique_ptr<mlxpdlp_result_t, decltype(&mlxpdlp_result_free)> result(
+            solver.solve(), mlxpdlp_result_free);
+        mx::synchronize(state.stream);
 
-    // Print solutions
-    printf("\nSolution:\n");
-    printf("  Primal x = [");
-    for (int i = 0; i < n; ++i) {
-        printf("%.8f%s", result->primal_solution[i], i < n - 1 ? ", " : "");
+        std::printf("Executed backend: %s\n",
+                    state.sparse_metal_active ? "CSR-Metal-FP32" : "dense-MLX-Metal-FP32");
+        std::printf("PDHG iterations: %d\n", result->total_count);
+
+        std::printf("\nSolution:\n");
+        std::printf("  Primal x = [");
+        for (int i = 0; i < n; ++i) {
+            std::printf("%.8f%s", result->primal_solution[i], i < n - 1 ? ", " : "");
+        }
+        std::printf("]\n");
+
+        std::printf("  Dual y   = [");
+        for (int i = 0; i < m; ++i) {
+            std::printf("%.8f%s", result->dual_solution[i], i < m - 1 ? ", " : "");
+        }
+        std::printf("]\n");
+
+        std::printf("  Objective = %.8f\n", result->primal_objective_value);
+
+        constexpr double tolerance = 5e-3;
+        const bool valid = result->termination_reason == TERMINATION_REASON_OPTIMAL &&
+                           std::fabs(result->primal_solution[0] - 1.0) <= tolerance &&
+                           std::fabs(result->primal_solution[1] - 2.0) <= tolerance &&
+                           std::fabs(result->primal_objective_value - 3.0) <= tolerance;
+        std::printf("\nMetal solve validation: %s\n", valid ? "PASS" : "FAIL");
+        std::printf("Note: this tiny LP proves Metal execution, not GPU acceleration.\n");
+        return valid ? 0 : 1;
+    } catch (const std::exception &error) {
+        std::fprintf(stderr, "Metal example failed: %s\n", error.what());
+        return 1;
     }
-    printf("]\n");
-
-    printf("  Dual y   = [");
-    for (int i = 0; i < m; ++i) {
-        printf("%.8f%s", result->dual_solution[i], i < m - 1 ? ", " : "");
-    }
-    printf("]\n");
-
-    printf("  Reduced cost = [");
-    for (int i = 0; i < n; ++i) {
-        printf("%.8f%s", result->reduced_cost[i], i < n - 1 ? ", " : "");
-    }
-    printf("]\n");
-
-    // Validate against expected
-    double expected_x[] = {1.0, 2.0};
-    double expected_y[] = {1.0, -1.0, 0.0};
-    double expected_obj = 3.0;
-    double tol = 5e-3; // relaxed tolerance for dense float32 implementation
-
-    bool x_ok = true, y_ok = true, obj_ok = true;
-    for (int i = 0; i < n; ++i) {
-        if (std::fabs(result->primal_solution[i] - expected_x[i]) > tol)
-            x_ok = false;
-    }
-    for (int i = 0; i < m; ++i) {
-        if (std::fabs(result->dual_solution[i] - expected_y[i]) > tol)
-            y_ok = false;
-    }
-    if (std::fabs(result->primal_objective_value - expected_obj) > tol)
-        obj_ok = false;
-
-    printf("\nValidation (tol=%.1e):\n", tol);
-    printf("  Primal solution: %s\n", x_ok ? "PASS" : "FAIL");
-    printf("  Dual solution:   %s\n", y_ok ? "PASS" : "FAIL");
-    printf("  Objective value: %s\n", obj_ok ? "PASS" : "FAIL");
-
-    bool all_ok = x_ok && y_ok && obj_ok;
-    printf("\n%s\n", all_ok ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");
-
-    mlxpdlp_result_free(result);
-
-    return all_ok ? 0 : 1;
 }

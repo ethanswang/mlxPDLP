@@ -362,8 +362,13 @@ int main() {
         return 1;
     }
 
-    std::printf("\nGPU/CPU wall-time ratio: %.3fx "
-                "(diagnostic only; do not assert speed on a tiny LP)\n",
-                gpu.wall_time_ms / cpu.wall_time_ms);
+    const double metal_speedup = cpu.wall_time_ms / gpu.wall_time_ms;
+    if (metal_speedup >= 1.0) {
+        std::printf("\nTiny-LP Metal speedup: %.3fx (diagnostic only)\n", metal_speedup);
+    } else {
+        std::printf("\nTiny-LP Metal slowdown: %.3fx; launch overhead dominates "
+                    "(diagnostic only)\n",
+                    1.0 / metal_speedup);
+    }
     return 0;
 }

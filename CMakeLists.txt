@@ -176,11 +176,30 @@ if(MLXPDLP_BUILD_MPS)
     list(APPEND MLXPDLP_INSTALL_TARGETS mlxpdlp_mps)
 endif()
 
-# Example
+# Examples
 if(MLXPDLP_BUILD_EXAMPLES)
     add_executable(mlxpdlp_example examples/basic.cpp)
     target_link_libraries(mlxpdlp_example PRIVATE mlxPDLP::solver)
     mlxpdlp_enable_warnings(mlxpdlp_example)
+
+    add_executable(mlxpdlp_metal_acceleration
+        examples/metal_acceleration.cpp
+    )
+    target_link_libraries(mlxpdlp_metal_acceleration PRIVATE mlxPDLP::solver)
+    mlxpdlp_enable_warnings(mlxpdlp_metal_acceleration)
+
+    if(BUILD_TESTING)
+        add_test(NAME metal_trivial_example COMMAND mlxpdlp_example)
+        add_test(NAME metal_acceleration_example
+            COMMAND mlxpdlp_metal_acceleration 8192 200)
+        set_tests_properties(
+            metal_trivial_example
+            metal_acceleration_example
+            PROPERTIES
+                SKIP_RETURN_CODE 77
+                TIMEOUT 120
+        )
+    endif()
 endif()
 
 # Original-model float64 validation shared by the LPfeas runner and its tests.

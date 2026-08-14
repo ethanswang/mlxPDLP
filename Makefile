@@ -71,6 +71,10 @@ help:
 	@echo "  make test         Build and run CTest"
 	@echo "  make install      Build and run cmake --install"
 	@echo
+	@echo "After make:"
+	@echo "  ./build/mlxpdlp_example             Solve a trivial LP on Metal"
+	@echo "  ./build/mlxpdlp_metal_acceleration  Compare generated CPU/Metal work"
+	@echo
 	@echo "Useful variables:"
 	@echo "  MLX_ROOT=/path                Installed MLX prefix"
 	@echo "  MLX_SOURCE_DIR=/path          MLX source tree"

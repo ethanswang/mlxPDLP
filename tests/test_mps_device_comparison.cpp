@@ -190,8 +190,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    std::printf("\nGPU/CPU wall-time ratio: %.3fx "
-                "(diagnostic only; lower is faster)\n",
-                gpu.wall_time_ms / cpu.wall_time_ms);
+    const double metal_speedup = cpu.wall_time_ms / gpu.wall_time_ms;
+    if (metal_speedup >= 1.0) {
+        std::printf("\nADLITTLE Metal speedup: %.3fx (diagnostic only)\n", metal_speedup);
+    } else {
+        std::printf("\nADLITTLE Metal slowdown: %.3fx (diagnostic only)\n", 1.0 / metal_speedup);
+    }
     return 0;
 }
