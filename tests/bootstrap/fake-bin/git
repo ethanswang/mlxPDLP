@@ -1,0 +1,58 @@
+#!/bin/sh
+
+# Copyright 2026 Ethan Wang <ethanshurui.wang@gmail.com>
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -eu
+
+: "${FAKE_GIT_LOG:?}"
+: "${FAKE_MLX_REVISION:?}"
+
+printf '%s\n' "$*" >> "$FAKE_GIT_LOG"
+
+if [ "$1" = clone ]; then
+    clone_destination=
+    for clone_argument in "$@"; do
+        clone_destination=$clone_argument
+    done
+    mkdir -p "$clone_destination/.git"
+    exit 0
+fi
+
+if [ "$1" != -C ]; then
+    exit 2
+fi
+
+checkout_dir=$2
+git_operation=$3
+shift 3
+
+case "$git_operation" in
+    checkout)
+        mkdir -p "$checkout_dir/mlx"
+        : > "$checkout_dir/CMakeLists.txt"
+        : > "$checkout_dir/mlx/mlx.h"
+        printf '%s\n' "$FAKE_MLX_REVISION" > "$checkout_dir/.fake-head"
+        ;;
+    rev-parse)
+        if [ "$1" = HEAD ]; then
+            cat "$checkout_dir/.fake-head"
+        else
+            printf '%s\n' "$FAKE_MLX_REVISION"
+        fi
+        ;;
+    *)
+        exit 2
+        ;;
+esac

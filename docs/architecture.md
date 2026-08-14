@@ -86,8 +86,9 @@ dependencies are:
 - CMake 3.25 or newer;
 - a C++20 compiler;
 - an MLX C++ library, either supplied by the user or privately bootstrapped by
-  the source-level Makefile after explicit approval;
-- PSLP 0.0.8 when `MLXPDLP_BUILD_PRESOLVE=ON`;
+  the source-level Makefile after explicit dependency-download approval;
+- PSLP 0.0.8 when `MLXPDLP_BUILD_PRESOLVE=ON`, supplied locally or obtained
+  under that same approval;
 - Zlib when the bundled MPS parser is enabled;
 - Foundation, Metal, MetalKit, and Accelerate on macOS.
 
@@ -102,14 +103,30 @@ headers. The selected build's `CMakeCache.txt` is inspected to report whether
 `MLX_BUILD_METAL=ON`.
 
 The source-level `make` entry point probes those hints, an existing mlxPDLP
-build cache, and normal CMake search paths before any network operation. If no
-usable MLX library is found, interactive builds ask for approval; noninteractive
-builds require `MLXPDLP_FETCH_MLX=ON`. The approved path checks out the MLX
-revision tested in CI, disables MLX tests/examples/benchmarks/Python and unused
-file-format backends, builds the static CPU/Metal library, and installs it under
-`_deps/mlx-install`. Source, build, and install trees remain separate so the
-normal `FindMLX.cmake` path is exercised. `MLXPDLP_FETCH_MLX=OFF` guarantees
-that this bootstrap performs no download.
+build cache, and normal CMake search paths before any network operation. It
+attempts project configuration with downloads disabled to determine whether
+PSLP is also available. Interactive builds ask once when a source dependency is
+missing; noninteractive builds require `MLXPDLP_FETCH_DEPS=ON`. Consent covers
+MLX, PSLP, and pinned third-party sources requested by MLX's CMake build. The
+approved path checks out the MLX revision tested in CI, disables MLX
+tests/examples/benchmarks/Python and unused file-format backends, builds the
+static CPU/Metal library, and installs it under `_deps/mlx-install`. Source,
+build, and install trees remain separate so the normal `FindMLX.cmake` path is
+exercised.
+
+`MLXPDLP_FETCH_DEPS=OFF` is passed to CMake on every invocation and guarantees
+that the bootstrap performs no dependency download, even if the build cache or
+`CMAKE_ARGS` previously enabled downloads. Direct CMake configuration has the
+same safe default through `MLXPDLP_ALLOW_DOWNLOADS=OFF`. A previously populated
+PSLP checkout is reused through `FETCHCONTENT_SOURCE_DIR_PSLP`, which disables
+Git's FetchContent update step. The deprecated `MLXPDLP_FETCH_MLX` name remains
+an alias for compatibility.
+
+Managed MLX cloning uses a staging directory. If either the destination or a
+staged download is incomplete or at the wrong revision, the bootstrap preserves
+it with an `.incomplete[.N]` suffix and replaces it with a fresh, pinned
+checkout. This makes interrupted first-run downloads recoverable without manual
+filesystem work while retaining any unexpected user content.
 
 ### Configure, build, and test
 
@@ -122,7 +139,8 @@ Equivalent direct CMake commands are:
 
 ```sh
 cmake -S . -B build \
-  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build
+  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build \
+  -DMLXPDLP_ALLOW_DOWNLOADS=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
@@ -131,12 +149,13 @@ Available build options:
 
 | Option | Default | Effect |
 |---|---:|---|
-| `BUILD_TESTING` | `ON` | Builds the four CTest targets |
+| `BUILD_TESTING` | `ON` | Builds and registers the available CTest targets |
 | `MLXPDLP_BUILD_PRESOLVE` | `ON` | Enables PSLP 0.0.8 presolve/postsolve support |
 | `MLXPDLP_BUILD_MPS` | `ON` | Builds the bundled MPS loader and requires Zlib |
 | `MLXPDLP_BUILD_EXAMPLES` | `ON` | Builds `mlxpdlp_example` |
 | `MLXPDLP_BUILD_BENCHMARKS` | `OFF` | Builds fixed-work and LPfeas Metal benchmarks |
 | `MLXPDLP_ENABLE_WARNINGS` | `ON` | Enables common compiler warnings |
+| `MLXPDLP_ALLOW_DOWNLOADS` | `OFF` | Allows direct CMake to fetch missing PSLP source |
 
 A minimal solver-only build can disable all optional targets:
 
@@ -832,6 +851,7 @@ CTest registers:
 
 | Test | Coverage |
 |---|---|
+| `bootstrap_dependency_policy` | Unified consent, offline enforcement, and interrupted-checkout recovery |
 | `mlx_basic` | Basic MLX CPU array operations |
 | `solver` | Solver, warm-start, presolve, postsolve, and termination regressions |
 | `device_comparison` | Analytic LP and duplicate-coordinate sparse LP on CPU and GPU |

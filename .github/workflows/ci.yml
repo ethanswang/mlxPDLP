@@ -26,7 +26,7 @@ jobs:
           CMAKE_BUILD_PARALLEL_LEVEL: 3
         run: |
           make \
-            MLXPDLP_FETCH_MLX=ON \
+            MLXPDLP_FETCH_DEPS=ON \
             CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release" \
             CMAKE_BUILD_ARGS="--parallel 3"
 

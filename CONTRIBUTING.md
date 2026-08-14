@@ -13,21 +13,24 @@ Thanks for helping improve mlxPDLP.
 
 ## Development setup
 
-The source-level Makefile reuses an existing MLX dependency or asks before
-downloading, building, and privately installing the tested revision:
+The source-level Makefile reuses existing MLX and PSLP dependencies or asks once
+before downloading MLX, PSLP, and MLX's pinned transitive build dependencies:
 
 ```sh
 make
 make test
 ```
 
-For a separately built MLX, provide its paths and prohibit fallback downloads:
+For a separately built MLX, provide its paths and prohibit all fallback
+downloads. Supply a local PSLP checkout too, or disable presolve on a fresh
+build:
 
 ```sh
-make MLXPDLP_FETCH_MLX=OFF \
+make MLXPDLP_FETCH_DEPS=OFF \
   MLX_SOURCE_DIR=/absolute/path/to/mlx \
-  MLX_BUILD_DIR=/absolute/path/to/mlx/build
-make test MLXPDLP_FETCH_MLX=OFF \
+  MLX_BUILD_DIR=/absolute/path/to/mlx/build \
+  CMAKE_ARGS='-DFETCHCONTENT_SOURCE_DIR_PSLP=/absolute/path/to/pslp-src'
+make test MLXPDLP_FETCH_DEPS=OFF \
   MLX_SOURCE_DIR=/absolute/path/to/mlx \
   MLX_BUILD_DIR=/absolute/path/to/mlx/build
 ```
@@ -36,7 +39,7 @@ The direct CMake workflow and checked-in presets remain available:
 
 ```sh
 export MLX_BUILD_DIR=/absolute/path/to/mlx/build
-cmake --preset dev
+cmake --preset dev -DMLXPDLP_ALLOW_DOWNLOADS=ON
 cmake --build --preset dev
 ctest --preset dev
 ```

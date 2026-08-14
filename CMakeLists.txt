@@ -32,6 +32,15 @@ option(MLXPDLP_BUILD_BENCHMARKS "Build performance benchmark executables" OFF)
 option(MLXPDLP_ENABLE_NETLIB_REGRESSION
     "Register the downloaded 40-case Netlib CPU/Metal regression suite" OFF)
 option(MLXPDLP_ENABLE_WARNINGS "Enable compiler warnings for mlxPDLP targets" ON)
+option(MLXPDLP_ALLOW_DOWNLOADS
+    "Allow CMake to download missing third-party source dependencies" OFF)
+
+# The source-level bootstrap uses this marker to distinguish a missing PSLP
+# dependency from an unrelated configure failure. Remove a stale marker at the
+# start of every configure so an earlier failure can never be misclassified.
+set(MLXPDLP_MISSING_PSLP_MARKER
+    "${CMAKE_BINARY_DIR}/.mlxpdlp-missing-pslp")
+file(REMOVE "${MLXPDLP_MISSING_PSLP_MARKER}")
 
 if(MLXPDLP_ENABLE_NETLIB_REGRESSION AND
    (NOT BUILD_TESTING OR NOT MLXPDLP_BUILD_BENCHMARKS OR
@@ -55,6 +64,31 @@ if(MLXPDLP_BUILD_PRESOLVE)
     find_package(PSLP 0.0.8 CONFIG QUIET)
     if(NOT TARGET PSLP::PSLP)
         include(FetchContent)
+
+        # A checkout populated by an earlier approved configure is safe to
+        # reuse with downloads disabled. Setting the documented FetchContent
+        # source override also suppresses Git's update step.
+        if(NOT FETCHCONTENT_SOURCE_DIR_PSLP AND
+           EXISTS "${FETCHCONTENT_BASE_DIR}/pslp-src/CMakeLists.txt")
+            set(FETCHCONTENT_SOURCE_DIR_PSLP
+                "${FETCHCONTENT_BASE_DIR}/pslp-src")
+        endif()
+        if(FETCHCONTENT_SOURCE_DIR_PSLP AND
+           NOT EXISTS "${FETCHCONTENT_SOURCE_DIR_PSLP}/CMakeLists.txt")
+            message(FATAL_ERROR
+                "FETCHCONTENT_SOURCE_DIR_PSLP does not contain a PSLP "
+                "source tree: ${FETCHCONTENT_SOURCE_DIR_PSLP}")
+        endif()
+        if(NOT MLXPDLP_ALLOW_DOWNLOADS AND
+           NOT FETCHCONTENT_SOURCE_DIR_PSLP)
+            file(WRITE "${MLXPDLP_MISSING_PSLP_MARKER}" "PSLP 0.0.8\n")
+            message(FATAL_ERROR
+                "PSLP 0.0.8 was not found and dependency downloads are "
+                "disabled. Provide PSLP_DIR or FETCHCONTENT_SOURCE_DIR_PSLP, "
+                "configure with -DMLXPDLP_BUILD_PRESOLVE=OFF, or explicitly "
+                "allow the download with -DMLXPDLP_ALLOW_DOWNLOADS=ON.")
+        endif()
+
         set(PSLP_BUILD_TESTING OFF CACHE BOOL "Build PSLP tests" FORCE)
         FetchContent_Declare(
             pslp
@@ -63,6 +97,7 @@ if(MLXPDLP_BUILD_PRESOLVE)
             GIT_SHALLOW TRUE
         )
         FetchContent_MakeAvailable(pslp)
+        file(REMOVE "${MLXPDLP_MISSING_PSLP_MARKER}")
         if(TARGET PSLP AND NOT TARGET PSLP::PSLP)
             add_library(PSLP::PSLP ALIAS PSLP)
         endif()
@@ -191,6 +226,10 @@ endif()
 
 # Tests
 if(BUILD_TESTING)
+    add_test(NAME bootstrap_dependency_policy
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bootstrap.sh"
+                   "${CMAKE_CURRENT_SOURCE_DIR}")
+
     add_executable(mlxpdlp_mlx_basic_test tests/test_mlx_basic.cpp)
     target_link_libraries(mlxpdlp_mlx_basic_test PRIVATE MLX::MLX)
     mlxpdlp_enable_warnings(mlxpdlp_mlx_basic_test)

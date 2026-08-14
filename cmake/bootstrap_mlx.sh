@@ -25,9 +25,12 @@ cmake_command=${CMAKE:-cmake}
 source_dir=${MLXPDLP_SOURCE_DIR:-}
 build_dir=${MLXPDLP_BUILD_DIR:-}
 deps_dir=${MLXPDLP_DEPS_DIR:-}
-fetch_mode=${MLXPDLP_FETCH_MLX:-ask}
+fetch_deps_mode=${MLXPDLP_FETCH_DEPS:-}
+legacy_fetch_mode=${MLXPDLP_FETCH_MLX:-}
 mlx_repository=${MLXPDLP_MLX_REPOSITORY:-https://github.com/ml-explore/mlx.git}
 mlx_revision=${MLXPDLP_MLX_REVISION:-25616a0a6acf78a6e23379a0ffcdc3296775a468}
+pslp_repository=https://github.com/dance858/PSLP.git
+pslp_revision=v0.0.8
 
 [ -n "$source_dir" ] || fail "MLXPDLP_SOURCE_DIR is not set"
 [ -n "$build_dir" ] || build_dir="$source_dir/build"
@@ -41,6 +44,59 @@ case "$deps_dir" in
     /*) ;;
     *) deps_dir="$source_dir/$deps_dir" ;;
 esac
+
+normalize_fetch_mode() {
+    case "$1" in
+        1|ON|on|YES|yes|TRUE|true) printf '%s\n' yes ;;
+        0|OFF|off|NO|no|FALSE|false) printf '%s\n' no ;;
+        ask|ASK|Ask|"") printf '%s\n' ask ;;
+        *) fail "$2 must be ON, OFF, or ask (got '$1')" ;;
+    esac
+}
+
+if [ -n "$fetch_deps_mode" ]; then
+    fetch_mode=$(normalize_fetch_mode "$fetch_deps_mode" MLXPDLP_FETCH_DEPS)
+else
+    fetch_mode=ask
+fi
+if [ -n "$legacy_fetch_mode" ]; then
+    normalized_legacy_fetch_mode=$(
+        normalize_fetch_mode "$legacy_fetch_mode" MLXPDLP_FETCH_MLX
+    )
+    if [ -n "$fetch_deps_mode" ] &&
+       [ "$normalized_legacy_fetch_mode" != "$fetch_mode" ]; then
+        fail "MLXPDLP_FETCH_DEPS and MLXPDLP_FETCH_MLX disagree"
+    fi
+    fetch_mode=$normalized_legacy_fetch_mode
+fi
+approval=$fetch_mode
+
+request_download_approval() {
+    case "$approval" in
+        yes) return 0 ;;
+        no) return 1 ;;
+    esac
+
+    printf '%s\n' "mlxPDLP needs one or more source dependencies that are not available locally."
+    printf '%s\n' "Approval allows this make invocation to access the network for:"
+    printf '  - MLX revision %.12s from %s (when MLX is missing)\n' \
+        "$mlx_revision" "$mlx_repository"
+    printf '  - PSLP %s from %s (when presolve is enabled and PSLP is missing)\n' \
+        "$pslp_revision" "$pslp_repository"
+    printf '%s\n' "  - MLX's pinned metal-cpp source from developer.apple.com"
+    printf '%s\n' "  - MLX's pinned JSON/fmt sources from github.com"
+    printf 'Managed files stay under %s and %s/_deps; no system prefix is modified.\n' \
+        "$deps_dir" "$build_dir"
+    printf '%s\n' "Allow roughly 1 GB of free disk space; the first build may take several minutes."
+    printf '%s' "Download and build the missing dependencies? [y/N] "
+    if IFS= read -r answer; then
+        case "$answer" in
+            y|Y|yes|YES|Yes) approval=yes; return 0 ;;
+        esac
+    fi
+    approval=no
+    return 1
+}
 
 command -v "$cmake_command" >/dev/null 2>&1 ||
     fail "CMake was not found (CMAKE=$cmake_command)"
@@ -105,60 +161,67 @@ if [ "$have_mlx" = no ] && [ -f "$managed_metadata" ]; then
 fi
 
 if [ "$have_mlx" = no ]; then
-    case "$fetch_mode" in
-        1|ON|on|YES|yes|TRUE|true)
-            approved=yes
-            ;;
-        0|OFF|off|NO|no|FALSE|false)
-            approved=no
-            ;;
-        ask|ASK|Ask|"")
-            printf '%s\n' "mlxPDLP could not find a usable MLX C++ library."
-            printf 'Download MLX revision %.12s from %s, build it, and install it under %s? [y/N] ' \
-                "$mlx_revision" "$mlx_repository" "$deps_dir"
-            if IFS= read -r answer; then
-                case "$answer" in
-                    y|Y|yes|YES|Yes) approved=yes ;;
-                    *) approved=no ;;
-                esac
-            else
-                approved=no
-            fi
-            ;;
-        *)
-            fail "MLXPDLP_FETCH_MLX must be ON, OFF, or ask (got '$fetch_mode')"
-            ;;
-    esac
-
-    if [ "$approved" != yes ]; then
+    if ! request_download_approval; then
         if [ "$explicit_hints" = yes ]; then
             printf '%s\n' "The supplied MLX path hints did not identify a usable library." >&2
         fi
-        fail "MLX is required. Provide MLX_ROOT/MLX_SOURCE_DIR/MLX_BUILD_DIR, or approve the managed dependency with 'make MLXPDLP_FETCH_MLX=ON'."
+        fail "MLX is required. Provide MLX_ROOT/MLX_SOURCE_DIR/MLX_BUILD_DIR," \
+            "or approve managed dependencies with 'make MLXPDLP_FETCH_DEPS=ON'."
     fi
 
     command -v git >/dev/null 2>&1 ||
         fail "Git is required to download MLX"
     mkdir -p "$deps_dir"
 
-    if [ ! -e "$managed_source_dir" ]; then
+    move_incomplete_checkout_aside() {
+        incomplete_path=$1
+        backup_path="$incomplete_path.incomplete"
+        backup_index=1
+        while [ -e "$backup_path" ]; do
+            backup_path="$incomplete_path.incomplete.$backup_index"
+            backup_index=$((backup_index + 1))
+        done
+        mv "$incomplete_path" "$backup_path"
+        printf 'mlxPDLP: preserved an incomplete managed checkout as %s\n' \
+            "$backup_path"
+    }
+
+    managed_source_usable=no
+    if [ -f "$managed_source_dir/CMakeLists.txt" ] &&
+       [ -f "$managed_source_dir/mlx/mlx.h" ]; then
+        managed_head=$(git -C "$managed_source_dir" rev-parse HEAD 2>/dev/null || true)
+        managed_requested=$(git -C "$managed_source_dir" \
+            rev-parse "$mlx_revision^{commit}" 2>/dev/null || true)
+        if [ -n "$managed_head" ] &&
+           [ "$managed_head" = "$managed_requested" ]; then
+            managed_source_usable=yes
+        fi
+    fi
+
+    if [ -e "$managed_source_dir" ] && [ "$managed_source_usable" = no ]; then
+        printf 'mlxPDLP: recovering the managed MLX source directory in %s\n' \
+            "$managed_source_dir"
+        move_incomplete_checkout_aside "$managed_source_dir"
+    fi
+
+    if [ "$managed_source_usable" = no ]; then
+        managed_download_dir="$managed_source_dir.download"
+        if [ -e "$managed_download_dir" ]; then
+            printf 'mlxPDLP: recovering an interrupted MLX download in %s\n' \
+                "$managed_download_dir"
+            move_incomplete_checkout_aside "$managed_download_dir"
+        fi
         printf 'mlxPDLP: downloading MLX revision %s from %s\n' \
             "$mlx_revision" "$mlx_repository"
         git clone --filter=blob:none --no-checkout \
-            "$mlx_repository" "$managed_source_dir"
-        git -C "$managed_source_dir" checkout --detach "$mlx_revision"
-    elif [ ! -f "$managed_source_dir/CMakeLists.txt" ] ||
-         [ ! -f "$managed_source_dir/mlx/mlx.h" ]; then
-        fail "$managed_source_dir exists but is not a usable MLX source tree; move it aside and retry"
-    else
-        managed_head=$(git -C "$managed_source_dir" rev-parse HEAD 2>/dev/null) ||
-            fail "$managed_source_dir is not the requested Git checkout; move it aside and retry"
-        managed_requested=$(git -C "$managed_source_dir" \
-            rev-parse "$mlx_revision^{commit}" 2>/dev/null) ||
-            fail "$managed_source_dir does not contain requested revision $mlx_revision; move it aside and retry"
-        if [ "$managed_head" != "$managed_requested" ]; then
-            fail "$managed_source_dir is at revision $managed_head, not requested revision $managed_requested; move it aside and retry"
+            "$mlx_repository" "$managed_download_dir"
+        git -C "$managed_download_dir" checkout --detach "$mlx_revision"
+        if [ ! -f "$managed_download_dir/CMakeLists.txt" ] ||
+           [ ! -f "$managed_download_dir/mlx/mlx.h" ]; then
+            fail "the downloaded MLX checkout is incomplete; retry to recover automatically"
         fi
+        mv "$managed_download_dir" "$managed_source_dir"
+    else
         printf 'mlxPDLP: reusing MLX source in %s\n' "$managed_source_dir"
     fi
 
@@ -213,21 +276,65 @@ else
     printf 'mlxPDLP: using a discoverable MLX installation\n'
 fi
 
-set -- "$cmake_command" -S "$source_dir" -B "$build_dir"
-[ -z "$mlx_root" ] || set -- "$@" "-DMLX_ROOT:PATH=$mlx_root"
-[ -z "$mlx_source_dir" ] || set -- "$@" "-DMLX_SOURCE_DIR:PATH=$mlx_source_dir"
-[ -z "$mlx_build_dir" ] || set -- "$@" "-DMLX_BUILD_DIR:PATH=$mlx_build_dir"
+configure_project() {
+    allow_downloads=$1
+    set -- "$cmake_command" -S "$source_dir" -B "$build_dir"
+    [ -z "$mlx_root" ] || set -- "$@" "-DMLX_ROOT:PATH=$mlx_root"
+    [ -z "$mlx_source_dir" ] || set -- "$@" "-DMLX_SOURCE_DIR:PATH=$mlx_source_dir"
+    [ -z "$mlx_build_dir" ] || set -- "$@" "-DMLX_BUILD_DIR:PATH=$mlx_build_dir"
 
-# CMAKE_ARGS is intentionally shell-word-split so callers can pass multiple
-# ordinary CMake options, for example CMAKE_ARGS='-DCMAKE_BUILD_TYPE=Release
-# -DBUILD_TESTING=OFF'. Paths with spaces should use the dedicated variables
-# above or a CMake preset instead.
-if [ -n "${CMAKE_ARGS:-}" ]; then
-    set -f
-    # shellcheck disable=SC2086
-    set -- "$@" $CMAKE_ARGS
-    set +f
-fi
+    # CMAKE_ARGS is intentionally shell-word-split so callers can pass
+    # multiple ordinary CMake options. Paths with spaces should use the
+    # dedicated variables above or a CMake preset instead.
+    if [ -n "${CMAKE_ARGS:-}" ]; then
+        set -f
+        # shellcheck disable=SC2086
+        set -- "$@" $CMAKE_ARGS
+        set +f
+    fi
 
-printf 'mlxPDLP: configuring the project in %s\n' "$build_dir"
-"$@"
+    # Append the consent decision after CMAKE_ARGS and pass it every time. A
+    # cached ON value or a conflicting CMAKE_ARGS entry must not weaken an
+    # explicit offline invocation.
+    set -- "$@" "-DMLXPDLP_ALLOW_DOWNLOADS:BOOL=$allow_downloads"
+    printf 'mlxPDLP: configuring the project in %s\n' "$build_dir"
+    "$@"
+}
+
+case "$approval" in
+    yes)
+        configure_project ON
+        ;;
+    no)
+        configure_project OFF
+        ;;
+    ask)
+        # Probe without network access first. If PSLP is the only missing
+        # dependency, CMake leaves a private marker and we can ask once before
+        # retrying. Any unrelated configure error is reproduced verbatim.
+        mkdir -p "$build_dir"
+        configure_log="$build_dir/.mlxpdlp-configure-probe.log"
+        missing_pslp_marker="$build_dir/.mlxpdlp-missing-pslp"
+        rm -f "$configure_log" "$missing_pslp_marker"
+        if configure_project OFF >"$configure_log" 2>&1; then
+            cat "$configure_log"
+            rm -f "$configure_log"
+        else
+            configure_status=$?
+            if [ -f "$missing_pslp_marker" ]; then
+                rm -f "$configure_log" "$missing_pslp_marker"
+                if ! request_download_approval; then
+                    fail "PSLP is required for presolve. Provide" \
+                        "PSLP_DIR/FETCHCONTENT_SOURCE_DIR_PSLP, disable presolve," \
+                        "or approve managed dependencies with" \
+                        "'make MLXPDLP_FETCH_DEPS=ON'."
+                fi
+                configure_project ON
+            else
+                cat "$configure_log" >&2
+                rm -f "$configure_log"
+                exit "$configure_status"
+            fi
+        fi
+        ;;
+esac

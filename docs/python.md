@@ -120,10 +120,17 @@ on FP32 Metal).
 ## Building from source
 
 ```sh
-MLX_BUILD_DIR=/path/to/mlx/build pip install ./python
-# reuse an existing PSLP checkout to avoid re-fetching:
-FETCHCONTENT_SOURCE_DIR_PSLP=/path/to/pslp-src pip install ./python
+# explicitly allow CMake to obtain PSLP:
+CMAKE_ARGS=-DMLXPDLP_ALLOW_DOWNLOADS=ON \
+  MLX_BUILD_DIR=/path/to/mlx/build pip install ./python
+# or remain offline by reusing an existing PSLP checkout:
+FETCHCONTENT_SOURCE_DIR_PSLP=/path/to/pslp-src \
+  MLX_BUILD_DIR=/path/to/mlx/build pip install ./python
 ```
+
+The CMake portion of a Python build does not download PSLP unless
+`MLXPDLP_ALLOW_DOWNLOADS=ON` is supplied. This flag does not govern packages
+that pip itself may obtain for its isolated build environment.
 
 The wheel links MLX and PSLP statically, so the installed package is
 self-contained (only macOS system frameworks are required at import

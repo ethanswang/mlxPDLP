@@ -44,7 +44,8 @@ or the original cuPDLPx source tree.
 - A C++20 compiler
 - An MLX C++ library (reused when installed or supplied, otherwise obtainable
   by the source-level `make` bootstrap)
-- PSLP 0.0.8 when `MLXPDLP_BUILD_PRESOLVE=ON` (found or fetched by CMake)
+- PSLP 0.0.8 when `MLXPDLP_BUILD_PRESOLVE=ON` (reused when available or
+  downloaded under the same explicit build-dependency consent)
 - Zlib when `MLXPDLP_BUILD_MPS=ON`
 - macOS and Apple Silicon for the Metal path
 
@@ -58,28 +59,39 @@ make test
 ```
 
 `make` checks the current build cache, `MLX_ROOT`, `MLX_SOURCE_DIR`, and
-`MLX_BUILD_DIR`, followed by normal CMake search locations. If none identify a
-usable MLX C++ library, it asks for approval before accessing the network. On
-approval it downloads the MLX revision tested by mlxPDLP, builds it with Metal
-enabled, and installs it privately under `_deps/`; it does not modify a system
-prefix. The same `make` invocation then configures and builds mlxPDLP. Later
-invocations reuse the private install without prompting.
+`MLX_BUILD_DIR`, followed by normal CMake search locations. It first attempts
+the complete configure with network access disabled. If MLX or PSLP is missing,
+it asks once before any download. The prompt covers the tested MLX revision,
+PSLP 0.0.8, MLX's metal-cpp archive from `developer.apple.com`, and its pinned
+JSON/fmt sources from `github.com`. Allow roughly 1 GB of free disk space and
+several minutes for the first MLX compilation. Approved dependencies are built
+privately under `_deps/` or the project build tree; no system prefix is
+modified. The same `make` invocation then configures and builds mlxPDLP. Later
+invocations reuse complete local dependencies without prompting.
 
 For a noninteractive build, the opt-in itself records approval:
 
 ```sh
-make MLXPDLP_FETCH_MLX=ON
+make MLXPDLP_FETCH_DEPS=ON
 ```
 
-To forbid the MLX fallback download, or to select an existing build explicitly:
+To prohibit every build-dependency download, or to select an existing MLX build
+explicitly:
 
 ```sh
-make MLXPDLP_FETCH_MLX=OFF \
+make MLXPDLP_FETCH_DEPS=OFF \
   MLX_SOURCE_DIR=/absolute/path/to/mlx \
-  MLX_BUILD_DIR=/absolute/path/to/mlx/build
+  MLX_BUILD_DIR=/absolute/path/to/mlx/build \
+  CMAKE_ARGS='-DFETCHCONTENT_SOURCE_DIR_PSLP=/absolute/path/to/pslp-src'
 ```
 
-An installed MLX prefix can be selected with `MLX_ROOT=/absolute/prefix`.
+With presolve enabled, an offline fresh build must provide an installed PSLP
+package through `PSLP_DIR`/`CMAKE_PREFIX_PATH` in `CMAKE_ARGS`, or a source tree
+as shown above. Alternatively, pass `-DMLXPDLP_BUILD_PRESOLVE=OFF`. An installed
+MLX prefix can be selected with `MLX_ROOT=/absolute/prefix`.
+
+`MLXPDLP_FETCH_MLX` remains accepted as a deprecated compatibility alias for
+`MLXPDLP_FETCH_DEPS`. If both are supplied, their normalized values must agree.
 Pass extra project options through `CMAKE_ARGS`, for example
 `make CMAKE_ARGS='-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF'`.
 
@@ -99,7 +111,8 @@ Then configure mlxPDLP directly:
 
 ```sh
 cmake -S . -B build \
-  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build
+  -DMLX_BUILD_DIR=/absolute/path/to/mlx/build \
+  -DMLXPDLP_ALLOW_DOWNLOADS=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
@@ -114,6 +127,13 @@ cmake -S . -B build \
 ```
 
 The GPU tests use CTest skip code 77 when MLX exposes no GPU device.
+
+Direct CMake configuration never downloads a missing PSLP checkout by default.
+Supply `PSLP_DIR` or `FETCHCONTENT_SOURCE_DIR_PSLP`, disable presolve, or pass
+`-DMLXPDLP_ALLOW_DOWNLOADS=ON` as explicit consent. The source-level Makefile
+sets this internal configure policy from the current invocation's
+`MLXPDLP_FETCH_DEPS` decision, so a cached value cannot weaken a later offline
+build.
 
 The managed dependency revision and repository can be overridden for testing
 with `MLXPDLP_MLX_REVISION` and `MLXPDLP_MLX_REPOSITORY`. Such overrides are
@@ -130,6 +150,7 @@ not part of the tested dependency combination.
 | `MLXPDLP_BUILD_BENCHMARKS` | `OFF` | Build fixed-work and LPfeas Metal benchmarks |
 | `MLXPDLP_ENABLE_NETLIB_REGRESSION` | `OFF` | Register the downloaded 40-case Netlib CPU/Metal regression suite |
 | `MLXPDLP_ENABLE_WARNINGS` | `ON` | Enable common compiler warnings |
+| `MLXPDLP_ALLOW_DOWNLOADS` | `OFF` | Allow direct CMake to obtain a missing PSLP source checkout |
 
 For a minimal solver-only library:
 
@@ -150,7 +171,8 @@ PSLP presolve, warm starts, CPU float64 / Metal float32 device
 selection):
 
 ```sh
-MLX_BUILD_DIR=/absolute/path/to/mlx/build pip install ./python
+CMAKE_ARGS=-DMLXPDLP_ALLOW_DOWNLOADS=ON \
+  MLX_BUILD_DIR=/absolute/path/to/mlx/build pip install ./python
 ```
 
 ```python

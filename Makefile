@@ -21,7 +21,11 @@ CMAKE_ARGS ?=
 CMAKE_BUILD_ARGS ?= --parallel
 CMAKE_TEST_ARGS ?= --output-on-failure
 CMAKE_INSTALL_ARGS ?=
-MLXPDLP_FETCH_MLX ?= ask
+# MLXPDLP_FETCH_MLX is retained as a compatibility alias. Leave both
+# variables empty here so the bootstrap can distinguish an explicit value;
+# it applies the default of "ask" itself.
+MLXPDLP_FETCH_DEPS ?=
+MLXPDLP_FETCH_MLX ?=
 MLXPDLP_MLX_CMAKE_ARGS ?=
 MLXPDLP_DEPS_DIR ?= $(MLXPDLP_SOURCE_DIR)/_deps
 
@@ -39,6 +43,7 @@ export MLX_ROOT
 export MLX_SOURCE_DIR
 export MLXPDLP_BUILD_DIR
 export MLXPDLP_DEPS_DIR
+export MLXPDLP_FETCH_DEPS
 export MLXPDLP_FETCH_MLX
 export MLXPDLP_MLX_CMAKE_ARGS
 export MLXPDLP_MLX_REPOSITORY
@@ -70,7 +75,9 @@ help:
 	@echo "  MLX_ROOT=/path                Installed MLX prefix"
 	@echo "  MLX_SOURCE_DIR=/path          MLX source tree"
 	@echo "  MLX_BUILD_DIR=/path           Existing MLX build tree"
-	@echo "  MLXPDLP_FETCH_MLX=ON|OFF|ask  Download consent (default: ask)"
+	@echo "  MLXPDLP_FETCH_DEPS=ON|OFF|ask Download consent for all dependencies"
+	@echo "                                  (default: ask)"
+	@echo "  MLXPDLP_FETCH_MLX=...          Deprecated alias for FETCH_DEPS"
 	@echo "  MLXPDLP_MLX_CMAKE_ARGS='-D...' Extra managed-MLX configure arguments"
 	@echo "  BUILD_DIR=/path               mlxPDLP build directory (default: build)"
 	@echo "  CMAKE_ARGS='-D...'            Extra mlxPDLP configure arguments"

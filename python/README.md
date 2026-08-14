@@ -22,14 +22,18 @@ built [MLX](https://github.com/ml-explore/mlx) C++ library (with
 `MLX_BUILD_METAL=ON` for the Metal backend).
 
 ```sh
-pip install . -Ccmake.define.MLX_BUILD_DIR=/absolute/path/to/mlx/build
+pip install . \
+  -Ccmake.define.MLX_BUILD_DIR=/absolute/path/to/mlx/build \
+  -Ccmake.define.MLXPDLP_ALLOW_DOWNLOADS=ON
 # or via an environment variable:
-MLX_BUILD_DIR=/absolute/path/to/mlx/build pip install .
+CMAKE_ARGS=-DMLXPDLP_ALLOW_DOWNLOADS=ON \
+  MLX_BUILD_DIR=/absolute/path/to/mlx/build pip install .
 ```
 
-PSLP 0.0.8 is fetched automatically by CMake when presolve support is
-enabled (default); reuse an existing checkout with
-`FETCHCONTENT_SOURCE_DIR_PSLP=/path/to/pslp-src`.
+PSLP 0.0.8 is downloaded only when presolve support is enabled (default) and
+`MLXPDLP_ALLOW_DOWNLOADS=ON` explicitly permits it. For an offline build, reuse
+an existing checkout with `FETCHCONTENT_SOURCE_DIR_PSLP=/path/to/pslp-src`
+alongside the MLX path shown above.
 
 ## Quick start
 
