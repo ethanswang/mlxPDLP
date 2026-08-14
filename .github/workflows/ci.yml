@@ -21,14 +21,59 @@ jobs:
       - name: Check out mlxPDLP
         uses: actions/checkout@v6
 
-      - name: Build mlxPDLP and its managed MLX dependency
+      - name: Fingerprint Xcode
+        id: xcode
+        run: |
+          echo "key=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f 1)" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Restore native dependencies
+        id: native-deps
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            _deps/mlx
+            _deps/mlx-build
+            _deps/mlx-install
+            build/_deps/pslp-src
+            build/_deps/pslp-build
+          key: native-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.key }}-mlx-25616a0a6acf-pslp-0.0.8-v1
+
+      - name: Bootstrap native dependencies on cache miss
+        if: steps.native-deps.outputs.cache-hit != 'true'
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 3
         run: |
-          make \
+          make configure \
             MLXPDLP_FETCH_DEPS=ON \
-            CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release" \
-            CMAKE_BUILD_ARGS="--parallel 3"
+            CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release"
+
+      - name: Save native dependencies
+        if: steps.native-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            _deps/mlx
+            _deps/mlx-build
+            _deps/mlx-install
+            build/_deps/pslp-src
+            build/_deps/pslp-build
+          key: ${{ steps.native-deps.outputs.cache-primary-key }}
+
+      - name: Configure mlxPDLP offline
+        run: >
+          cmake
+          -S .
+          -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DMLX_ROOT=${{ github.workspace }}/_deps/mlx-install
+          -DMLX_SOURCE_DIR=${{ github.workspace }}/_deps/mlx
+          -DMLX_BUILD_DIR=${{ github.workspace }}/_deps/mlx-build
+          -DFETCHCONTENT_SOURCE_DIR_PSLP=${{ github.workspace }}/build/_deps/pslp-src
+          -DMLXPDLP_ALLOW_DOWNLOADS=OFF
+
+      - name: Build mlxPDLP
+        run: cmake --build build --parallel 3
 
       - name: Test mlxPDLP
         run: ctest --test-dir build --output-on-failure
