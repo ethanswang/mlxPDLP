@@ -1457,6 +1457,74 @@ test_cleanup:
     mlxpdlp_result_free(result);
 }
 
+static void test_pdhg_infeasibility_certificates() {
+    TEST("PDHG Farkas certificates terminate infeasible and unbounded LPs");
+
+    // Provably primal-infeasible (x = 3 and x = 2 simultaneously) and
+    // provably unbounded (min -x subject to x >= 0) fixtures with presolve
+    // disabled, so PDHG itself must certify the status through the Farkas
+    // separation ray tests. The FP64 CPU path certifies both.
+    mlxpdlp_result_t *result = nullptr;
+
+    {
+        int row_ptr[] = {0, 1, 2};
+        int col_ind[] = {0, 0};
+        double vals[] = {1.0, 1.0};
+        double obj[] = {0.0};
+        double con_lb[] = {3.0, 2.0};
+        double con_ub[] = {3.0, 2.0};
+        double var_lb[] = {-INFINITY};
+        double var_ub[] = {INFINITY};
+
+        pdhg_parameters_t params;
+        mlxpdlp_set_default_parameters(&params);
+        params.verbose = false;
+        set_safe_limits(&params);
+
+        MlxPdlpSolver solver(1, 2, row_ptr, col_ind, vals, var_lb, var_ub,
+                             con_lb, con_ub, obj, 0.0, &params);
+        result = solver.solve();
+        CHECK(result->termination_reason == TERMINATION_REASON_PRIMAL_INFEASIBLE,
+              "PDHG should certify primal infeasibility");
+        CHECK(result->total_count < 100000,
+              "the certificate should terminate far before the iteration limit");
+        mlxpdlp_result_free(result);
+        result = nullptr;
+    }
+
+    {
+        int row_ptr[] = {0, 1};
+        int col_ind[] = {0};
+        double vals[] = {1.0};
+        double obj[] = {-1.0};
+        double con_lb[] = {0.0};
+        double con_ub[] = {INFINITY};
+        double var_lb[] = {-INFINITY};
+        double var_ub[] = {INFINITY};
+
+        pdhg_parameters_t params;
+        mlxpdlp_set_default_parameters(&params);
+        params.verbose = false;
+        set_safe_limits(&params);
+
+        MlxPdlpSolver solver(1, 1, row_ptr, col_ind, vals, var_lb, var_ub,
+                             con_lb, con_ub, obj, 0.0, &params);
+        result = solver.solve();
+        CHECK(result->termination_reason == TERMINATION_REASON_DUAL_INFEASIBLE,
+              "PDHG should certify dual infeasibility (unbounded primal)");
+        CHECK(result->total_count < 100000,
+              "the certificate should terminate far before the iteration limit");
+        mlxpdlp_result_free(result);
+        result = nullptr;
+    }
+
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(result);
+}
+
 #ifdef MLXPDLP_TEST_HAS_PRESOLVE
 static void test_presolve_solves_problem() {
     TEST("presolve solves and postsolves a small LP");
@@ -1703,6 +1771,7 @@ int main() {
     test_cpu_scalar_arithmetic_preserves_fp64();
     test_original_certificate_checks_variable_bounds();
     test_host_double_polish_repairs_variable_bounds();
+    test_pdhg_infeasibility_certificates();
 #ifdef MLXPDLP_TEST_HAS_PRESOLVE
     test_presolve_solves_problem();
     test_presolve_then_pdhg_postsolve();

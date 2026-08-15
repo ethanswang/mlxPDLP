@@ -908,8 +908,8 @@ CTest registers:
 | `tiny_convergence_example` | Exact-LP fixed-iteration sweep (`regression;smoke;convergence`) |
 | `netlib_convergence_example` | Netlib ADLITTLE convergence sweep and published-objective check |
 | `mlx_basic` | Basic MLX CPU array operations |
-| `solver` | Solver, warm-start, presolve, postsolve, and termination regressions |
-| `device_comparison` | Analytic LP and duplicate-coordinate sparse LP on CPU and GPU |
+| `solver` | Solver, warm-start, presolve, postsolve, termination, and FP64 Farkas infeasibility-certificate regressions |
+| `device_comparison` | Analytic and sparse LPs on CPU and GPU, fused/unfused iteration agreement across all three SpMV strategies, SIMD-group threshold override, and the FP32 Metal infeasibility certificate |
 | `mps_device_comparison` | Bundled Netlib ADLITTLE MPS on CPU and GPU |
 | `netlib_regression_cpu` | Opt-in downloaded 40-case Netlib audit on CPU FP64 |
 | `netlib_regression_metal` | Opt-in downloaded 40-case Netlib audit on Metal FP32 |

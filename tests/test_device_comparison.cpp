@@ -578,72 +578,41 @@ bool spmv_simdgroup_threshold_override() {
 }
 
 bool infeasibility_certificates_match() {
-    // Two synthetic certificates exercise the wired Farkas termination:
-    //  - a provably primal-infeasible LP (x = 3 and x = 2 simultaneously),
-    //  - a provably unbounded LP (min -x subject to x >= 0).
-    // FP64 certifies both cleanly; FP32 ray arithmetic only reliably
-    // certifies the unbounded case (see docs/architecture.md).
-    auto make_params = []() {
-        pdhg_parameters_t params;
-        mlxpdlp_set_default_parameters(&params);
-        params.verbose = false;
-        params.presolve = false;
-        params.feasibility_polishing = false;
-        params.host_double_polishing = false;
-        params.termination_criteria.iteration_limit = 100000;
-        params.termination_criteria.time_sec_limit = 60.0;
-        return params;
-    };
-
-    bool valid = true;
-
-    {
-        // Primal infeasible (FP64 CPU path).
-        int row_ptr[] = {0, 1, 2};
-        int col_ind[] = {0, 0};
-        double values[] = {1.0, 1.0};
-        double obj[] = {0.0};
-        double con_lb[] = {3.0, 2.0};
-        double con_ub[] = {3.0, 2.0};
-        double var_lb[] = {-INFINITY};
-        double var_ub[] = {INFINITY};
-        pdhg_parameters_t params = make_params();
-        MlxPdlpSolver solver(1, 2, row_ptr, col_ind, values, var_lb, var_ub,
-                             con_lb, con_ub, obj, 0.0, &params, mx::Device::cpu);
-        mlxpdlp_result_t *result = solver.solve();
-        valid = valid && result->termination_reason == TERMINATION_REASON_PRIMAL_INFEASIBLE &&
-                result->total_count < 100000;
-        std::printf("MLX/CPU  primal-infeasible certificate %s\n",
-                    result->termination_reason == TERMINATION_REASON_PRIMAL_INFEASIBLE
-                        ? "PASS" : "FAIL");
-        destroy_result(result);
+    // GPU-side Farkas termination coverage: a provably unbounded LP
+    // (min -x subject to x >= 0) that FP32 Metal certifies cleanly. The FP64
+    // CPU certificates for both directions live in test_solver.cpp's
+    // test_pdhg_infeasibility_certificates so CPU-only builds still cover
+    // them (see docs/architecture.md for the FP32 ray-arithmetic floor).
+    if (!mx::is_available(mx::Device::gpu)) {
+        return true;
     }
 
-    const mx::Device devices[] = {mx::Device::cpu, mx::Device::gpu};
-    for (const mx::Device &device : devices) {
-        if (device.type == mx::Device::gpu && !mx::is_available(mx::Device::gpu)) {
-            continue;
-        }
-        int row_ptr[] = {0, 1};
-        int col_ind[] = {0};
-        double values[] = {1.0};
-        double obj[] = {-1.0};
-        double con_lb[] = {0.0};
-        double con_ub[] = {INFINITY};
-        double var_lb[] = {-INFINITY};
-        double var_ub[] = {INFINITY};
-        pdhg_parameters_t params = make_params();
-        MlxPdlpSolver solver(1, 1, row_ptr, col_ind, values, var_lb, var_ub,
-                             con_lb, con_ub, obj, 0.0, &params, device);
-        mlxpdlp_result_t *result = solver.solve();
-        const bool ok = result->termination_reason == TERMINATION_REASON_DUAL_INFEASIBLE &&
-                        result->total_count < 100000;
-        valid = valid && ok;
-        std::printf("%-8s dual-infeasible certificate %s\n", device_name(device),
-                    ok ? "PASS" : "FAIL");
-        destroy_result(result);
-    }
-    return valid;
+    int row_ptr[] = {0, 1};
+    int col_ind[] = {0};
+    double values[] = {1.0};
+    double obj[] = {-1.0};
+    double con_lb[] = {0.0};
+    double con_ub[] = {INFINITY};
+    double var_lb[] = {-INFINITY};
+    double var_ub[] = {INFINITY};
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.feasibility_polishing = false;
+    params.host_double_polishing = false;
+    params.termination_criteria.iteration_limit = 100000;
+    params.termination_criteria.time_sec_limit = 60.0;
+
+    MlxPdlpSolver solver(1, 1, row_ptr, col_ind, values, var_lb, var_ub, con_lb,
+                         con_ub, obj, 0.0, &params, mx::Device::gpu);
+    mlxpdlp_result_t *result = solver.solve();
+    const bool ok = result->termination_reason == TERMINATION_REASON_DUAL_INFEASIBLE &&
+                    result->total_count < 100000;
+    std::printf("MLX/GPU  dual-infeasible certificate %s\n", ok ? "PASS" : "FAIL");
+    destroy_result(result);
+    return ok;
 }
 
 bool metal_host_double_handoff_uses_saved_checkpoint() {
