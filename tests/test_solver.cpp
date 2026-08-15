@@ -1319,6 +1319,144 @@ static void test_warm_start_validation() {
 test_cleanup:;
 }
 
+static void test_cpu_scalar_arithmetic_preserves_fp64() {
+    TEST("CPU scalar-array arithmetic preserves FP64 coefficients");
+
+    int row_ptr[] = {0};
+    constexpr double objective_coefficient = 0.26741329404626046351;
+    double obj[] = {objective_coefficient};
+    double var_lb[] = {-10.0};
+    double var_ub[] = {10.0};
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.curtis_reid_iterations = 0;
+    params.l_inf_ruiz_iterations = 0;
+    params.has_pock_chambolle_alpha = false;
+    params.bound_objective_rescaling = false;
+    params.feasibility_polishing = false;
+    params.host_double_polishing = false;
+    params.termination_evaluation_frequency = 2;
+    params.termination_criteria.eps_optimal_relative = 0.0;
+    params.termination_criteria.eps_feasible_relative = 0.0;
+    params.termination_criteria.iteration_limit = 2;
+    params.termination_criteria.time_sec_limit = 2.0;
+
+    MlxPdlpSolver solver(1, 0, row_ptr, nullptr, nullptr, var_lb, var_ub,
+                         nullptr, nullptr, obj, 0.0, &params, mx::Device::cpu);
+    mlxpdlp_result_t *result = solver.solve();
+    const double expected =
+        -2.0 * objective_coefficient / (1.0 + std::fabs(objective_coefficient));
+
+    CHECK(result->total_count == 2, "fixture should execute exactly one two-step block");
+    CHECK_CLOSE(result->primal_solution[0], expected, 5e-14,
+                "CPU iterate uses the full double-precision step coefficient");
+
+    mlxpdlp_result_free(result);
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(result);
+}
+
+static void test_original_certificate_checks_variable_bounds() {
+    TEST("original certificate rejects variable-bound violations");
+
+    int row_ptr[] = {0, 0};
+    double var_lb[] = {0.0};
+    double var_ub[] = {1.0};
+    double con_lb[] = {-INFINITY};
+    double con_ub[] = {INFINITY};
+    double obj[] = {0.0};
+    double primal_start[] = {2.0};
+    double dual_start[] = {0.0};
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.curtis_reid_iterations = 0;
+    params.l_inf_ruiz_iterations = 0;
+    params.has_pock_chambolle_alpha = false;
+    params.bound_objective_rescaling = false;
+    params.feasibility_polishing = false;
+    params.host_double_polishing = false;
+    params.termination_evaluation_frequency = 2;
+    params.termination_criteria.eps_optimal_relative = 1e-8;
+    params.termination_criteria.eps_feasible_relative = 1e-8;
+    params.termination_criteria.iteration_limit = 0;
+    params.termination_criteria.time_sec_limit = 2.0;
+
+    MlxPdlpSolver solver(1, 1, row_ptr, nullptr, nullptr, var_lb, var_ub,
+                         con_lb, con_ub, obj, 0.0, &params,
+                         primal_start, dual_start, mx::Device::cpu);
+    mlxpdlp_result_t *result = solver.solve();
+
+    CHECK(result->termination_reason == TERMINATION_REASON_ITERATION_LIMIT,
+          "out-of-bounds warm start must not be promoted to OPTIMAL");
+    CHECK_CLOSE(result->primal_solution[0], 2.0, 0.0,
+                "disabled host polishing preserves the supplied warm start");
+
+    mlxpdlp_result_free(result);
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(result);
+}
+
+static void test_host_double_polish_repairs_variable_bounds() {
+    TEST("host-double polish repairs a bound-only violation");
+
+    int row_ptr[] = {0, 0};
+    double var_lb[] = {0.0};
+    double var_ub[] = {1.0};
+    double con_lb[] = {-INFINITY};
+    double con_ub[] = {INFINITY};
+    double obj[] = {0.0};
+    double primal_start[] = {2.0};
+    double dual_start[] = {0.0};
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.curtis_reid_iterations = 0;
+    params.l_inf_ruiz_iterations = 0;
+    params.has_pock_chambolle_alpha = false;
+    params.bound_objective_rescaling = false;
+    params.feasibility_polishing = false;
+    params.host_double_polishing = true;
+    params.host_double_polishing_iteration_limit = 4;
+    params.host_double_polishing_time_sec_limit = 2.0;
+    params.termination_evaluation_frequency = 2;
+    params.termination_criteria.eps_optimal_relative = 1e-8;
+    params.termination_criteria.eps_feasible_relative = 1e-8;
+    params.termination_criteria.iteration_limit = 0;
+    params.termination_criteria.time_sec_limit = 2.0;
+
+    MlxPdlpSolver solver(1, 1, row_ptr, nullptr, nullptr, var_lb, var_ub,
+                         con_lb, con_ub, obj, 0.0, &params,
+                         primal_start, dual_start, mx::Device::cpu);
+    mlxpdlp_result_t *result = solver.solve();
+
+    CHECK(result->primal_solution[0] >= var_lb[0] &&
+              result->primal_solution[0] <= var_ub[0],
+          "host-double polish should clamp the primal point to original bounds");
+    CHECK(result->termination_reason == TERMINATION_REASON_OPTIMAL,
+          "repaired bound-feasible certificate should be OPTIMAL");
+
+    mlxpdlp_result_free(result);
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(result);
+}
+
 #ifdef MLXPDLP_TEST_HAS_PRESOLVE
 static void test_presolve_solves_problem() {
     TEST("presolve solves and postsolves a small LP");
@@ -1562,6 +1700,9 @@ int main() {
     test_warm_start();
     test_complete_warm_certificate();
     test_warm_start_validation();
+    test_cpu_scalar_arithmetic_preserves_fp64();
+    test_original_certificate_checks_variable_bounds();
+    test_host_double_polish_repairs_variable_bounds();
 #ifdef MLXPDLP_TEST_HAS_PRESOLVE
     test_presolve_solves_problem();
     test_presolve_then_pdhg_postsolve();

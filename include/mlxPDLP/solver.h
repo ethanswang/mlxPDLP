@@ -497,7 +497,6 @@ class MlxPdlpSolver {
     double mlx_norm2(const mx::array &v);
     double mlx_norm_inf(const mx::array &v);
     double mlx_sum(const mx::array &v);
-    int mlx_argmax_abs(const mx::array &v);
 
     // ---- CSR → dense conversion ----
     mx::array csr_to_dense(int rows, int cols, const int *row_ptr, const int *col_ind,
@@ -545,7 +544,7 @@ class MlxPdlpSolver {
     mlxpdlp_result_t *extract_presolve_result();
     void apply_postsolve(mlxpdlp_result_t *result);
     void polish_original_dual_certificate(mlxpdlp_result_t *result);
-    void recompute_original_certificate(mlxpdlp_result_t *result);
+    double recompute_original_certificate(mlxpdlp_result_t *result);
     void host_double_polish(mlxpdlp_result_t *result, bool working_model = false);
 };
 

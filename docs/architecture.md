@@ -397,7 +397,6 @@ scalars:
 | `mlx_norm2(v)` | `linalg::norm(v)` | `double` |
 | `mlx_norm_inf(v)` | `max(abs(v))` | `double` |
 | `mlx_sum(v)` | `sum(v)` | `double` |
-| `mlx_argmax_abs(v)` | `argmax(abs(v))` | `int` |
 
 ## Bounds and finite-safe arrays
 

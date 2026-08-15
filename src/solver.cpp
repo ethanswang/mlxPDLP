@@ -172,6 +172,13 @@ static double mlx_scalar_as_double(const mx::array &value) {
     return static_cast<double>(value.item<float>());
 }
 
+// MLX intentionally maps an implicitly constructed C++ double scalar to
+// float32. Bind host-computed coefficients to the array compute dtype so CPU
+// expressions retain FP64 while Metal stays FP32.
+static mx::array mlx_scalar_like(double value, const mx::array &reference) {
+    return mx::array(value, reference.dtype());
+}
+
 static const char *termination_reason_str(termination_reason_t r) {
     switch (r) {
     case TERMINATION_REASON_OPTIMAL:
@@ -1232,12 +1239,6 @@ double MlxPdlpSolver::mlx_sum(const mx::array &v) {
     return mlx_scalar_as_double(s);
 }
 
-int MlxPdlpSolver::mlx_argmax_abs(const mx::array &v) {
-    auto idx = mx::argmax(mx::abs(v));
-    mx::eval(idx);
-    return idx.item<int>();
-}
-
 // ---------------------------------------------------------------------------
 // Preconditioning
 // ---------------------------------------------------------------------------
@@ -1644,16 +1645,18 @@ void MlxPdlpSolver::mlx_bound_objective_scaling() {
     double objective_scale = 1.0 / (obj_norm + 1.0);
 
     // scale_bounds_kernel: con_lb *= constraint_scale, con_ub *= constraint_scale
-    s_.con_lb = s_.con_lb * constraint_scale;
-    s_.con_ub = s_.con_ub * constraint_scale;
-    s_.y_cur = s_.y_cur * objective_scale;
+    auto constraint_scale_scalar = mlx_scalar_like(constraint_scale, s_.obj);
+    auto objective_scale_scalar = mlx_scalar_like(objective_scale, s_.obj);
+    s_.con_lb = s_.con_lb * constraint_scale_scalar;
+    s_.con_ub = s_.con_ub * constraint_scale_scalar;
+    s_.y_cur = s_.y_cur * objective_scale_scalar;
 
     // scale_objective_kernel: var_lb *= constraint_scale, var_ub *= constraint_scale,
     // obj *= objective_scale
-    s_.var_lb = s_.var_lb * constraint_scale;
-    s_.var_ub = s_.var_ub * constraint_scale;
-    s_.obj = s_.obj * objective_scale;
-    s_.x_cur = s_.x_cur * constraint_scale;
+    s_.var_lb = s_.var_lb * constraint_scale_scalar;
+    s_.var_ub = s_.var_ub * constraint_scale_scalar;
+    s_.obj = s_.obj * objective_scale_scalar;
+    s_.x_cur = s_.x_cur * constraint_scale_scalar;
 
     // Update accumulated rescaling
     s_.con_bound_rescale = constraint_scale;
@@ -1701,7 +1704,7 @@ double MlxPdlpSolver::mlx_estimate_max_singular_value() {
                 printf("  SV: iter %d norm near zero (%.2e), stopping\n", i, en);
             break;
         }
-        eigen = eigen / en;
+        eigen = eigen / mlx_scalar_like(en, eigen);
 
         // y = A^T * eigen
         auto y = mat_ATx(eigen);
@@ -1724,7 +1727,8 @@ double MlxPdlpSolver::mlx_estimate_max_singular_value() {
         has_estimate = true;
 
         // residual = eigen_new - sigma_sq * eigen
-        auto residual_vec = eigen_new - sigma_sq * eigen;
+        auto residual_vec =
+            eigen_new - mlx_scalar_like(sigma_sq, eigen) * eigen;
         double rn = mlx_norm2(residual_vec);
 
         if (debug && (i < 5 || i % 100 == 0)) {
@@ -1766,24 +1770,27 @@ void MlxPdlpSolver::mlx_compute_next_primal(int k_offset, bool is_major) {
     s_.ATy = mat_ATx(s_.y_cur);
 
     // temp = x_cur - step_primal * (obj - ATy)
-    auto temp = s_.x_cur - s_.step_size_primal * (s_.obj - s_.ATy);
+    auto step_size_primal = mlx_scalar_like(s_.step_size_primal, s_.x_cur);
+    auto temp = s_.x_cur - step_size_primal * (s_.obj - s_.ATy);
 
     // temp_proj = clip(temp, var_lb, var_ub)
     auto temp_proj = mx::clip(temp, s_.var_lb, s_.var_ub);
 
     // x_ref = 2 * temp_proj - x_cur
-    s_.x_ref = 2.0 * temp_proj - s_.x_cur;
+    s_.x_ref = mlx_scalar_like(2.0, temp_proj) * temp_proj - s_.x_cur;
 
     // reflected = rc * x_ref + (1 - rc) * x_cur
-    auto reflected = rc * s_.x_ref + (1.0 - rc) * s_.x_cur;
+    auto reflected = mlx_scalar_like(rc, s_.x_ref) * s_.x_ref +
+                     mlx_scalar_like(1.0 - rc, s_.x_cur) * s_.x_cur;
 
     // x_cur = weight * reflected + (1 - weight) * x_init
-    s_.x_cur = weight * reflected + (1.0 - weight) * s_.x_init;
+    s_.x_cur = mlx_scalar_like(weight, reflected) * reflected +
+               mlx_scalar_like(1.0 - weight, s_.x_init) * s_.x_init;
 
     if (is_major) {
         s_.x_pdhg = temp_proj;
         // dual_slack = (x_pdhg - temp) / step_size_primal
-        s_.dual_slack = (s_.x_pdhg - temp) / s_.step_size_primal;
+        s_.dual_slack = (s_.x_pdhg - temp) / step_size_primal;
     }
 
     mx::eval(s_.ATy, s_.x_cur);
@@ -1801,22 +1808,25 @@ void MlxPdlpSolver::mlx_compute_next_dual(int k_offset, bool is_major) {
     s_.Ax = mat_Ax(s_.x_ref);
 
     // temp = y_cur / step_dual - Ax
-    auto temp = s_.y_cur / s_.step_size_dual - s_.Ax;
+    auto step_size_dual = mlx_scalar_like(s_.step_size_dual, s_.y_cur);
+    auto temp = s_.y_cur / step_size_dual - s_.Ax;
 
     // temp_proj = clip(temp, -con_ub, -con_lb)
     auto temp_proj = mx::clip(temp, -s_.con_ub, -s_.con_lb);
 
     // y_pdhg_iter = (temp - temp_proj) * step_dual
-    auto y_pdhg_iter = (temp - temp_proj) * s_.step_size_dual;
+    auto y_pdhg_iter = (temp - temp_proj) * step_size_dual;
 
     // y_ref = 2 * y_pdhg_iter - y_cur
-    s_.y_ref = 2.0 * y_pdhg_iter - s_.y_cur;
+    s_.y_ref = mlx_scalar_like(2.0, y_pdhg_iter) * y_pdhg_iter - s_.y_cur;
 
     // reflected = rc * y_ref + (1 - rc) * y_cur
-    auto reflected = rc * s_.y_ref + (1.0 - rc) * s_.y_cur;
+    auto reflected = mlx_scalar_like(rc, s_.y_ref) * s_.y_ref +
+                     mlx_scalar_like(1.0 - rc, s_.y_cur) * s_.y_cur;
 
     // y_cur = weight * reflected + (1 - weight) * y_init
-    s_.y_cur = weight * reflected + (1.0 - weight) * s_.y_init;
+    s_.y_cur = mlx_scalar_like(weight, reflected) * reflected +
+               mlx_scalar_like(1.0 - weight, s_.y_init) * s_.y_init;
 
     if (is_major) {
         s_.y_pdhg = y_pdhg_iter;
@@ -1903,10 +1913,12 @@ void MlxPdlpSolver::mlx_compute_residual() {
     // Applying only the global scalar factors here used to under-report
     // nonuniformly scaled residuals and could terminate several times too
     // early on LPFeas instances.
-    auto primal_res_original = s_.primal_res * s_.con_rescale / s_.con_bound_rescale;
-    auto dual_res_original = s_.dual_res * s_.var_rescale / s_.obj_vec_rescale;
+    auto con_bound_rescale = mlx_scalar_like(s_.con_bound_rescale, s_.primal_res);
+    auto obj_vec_rescale = mlx_scalar_like(s_.obj_vec_rescale, s_.dual_res);
+    auto primal_res_original = s_.primal_res * s_.con_rescale / con_bound_rescale;
+    auto dual_res_original = s_.dual_res * s_.var_rescale / obj_vec_rescale;
     auto restart_dual_res_original =
-        restart_dual_res * s_.var_rescale / s_.obj_vec_rescale;
+        restart_dual_res * s_.var_rescale / obj_vec_rescale;
     mx::eval(primal_res_original, dual_res_original, restart_dual_res_original);
     s_.absolute_primal_residual =
         params_.optimality_norm == NORM_TYPE_L_INF ? mlx_norm_inf(primal_res_original)
@@ -2089,7 +2101,8 @@ void MlxPdlpSolver::mlx_primal_feasibility_polish() {
         s_.Ax = mat_Ax(s_.x_pdhg);
         s_.primal_res = s_.Ax - mx::clip(s_.Ax, s_.con_lb, s_.con_ub);
         auto original_residual =
-            s_.primal_res * s_.con_rescale / s_.con_bound_rescale;
+            s_.primal_res * s_.con_rescale /
+            mlx_scalar_like(s_.con_bound_rescale, s_.primal_res);
         mx::eval(s_.primal_res, original_residual);
         s_.absolute_primal_residual =
             params_.optimality_norm == NORM_TYPE_L_INF ? mlx_norm_inf(original_residual)
@@ -2183,7 +2196,8 @@ void MlxPdlpSolver::mlx_primal_feasibility_polish() {
     constexpr int blend_intervals = 64;
     for (int trial = 1; trial <= blend_intervals; ++trial) {
         const double alpha = static_cast<double>(trial) / blend_intervals;
-        s_.x_pdhg = (1.0 - alpha) * baseline_x + alpha * polished_x;
+        s_.x_pdhg = mlx_scalar_like(1.0 - alpha, baseline_x) * baseline_x +
+                    mlx_scalar_like(alpha, polished_x) * polished_x;
         mx::eval(s_.x_pdhg);
         mlx_compute_residual();
         const double merit = std::max(
@@ -2339,7 +2353,9 @@ void MlxPdlpSolver::mlx_dual_feasibility_polish() {
                                   mx::zeros_like(reduced_cost_lb_adjusted)),
                       reduced_cost_lb_adjusted);
         s_.dual_res = reduced_cost_raw - reduced_cost;
-        auto original_residual = s_.dual_res * s_.var_rescale / s_.obj_vec_rescale;
+        auto original_residual =
+            s_.dual_res * s_.var_rescale /
+            mlx_scalar_like(s_.obj_vec_rescale, s_.dual_res);
         mx::eval(s_.ATy, s_.dual_res, original_residual);
         s_.absolute_dual_residual =
             params_.optimality_norm == NORM_TYPE_L_INF ? mlx_norm_inf(original_residual)
@@ -2435,9 +2451,12 @@ void MlxPdlpSolver::mlx_dual_feasibility_polish() {
     constexpr int blend_intervals = 64;
     for (int trial = 1; trial <= blend_intervals; ++trial) {
         const double alpha = static_cast<double>(trial) / blend_intervals;
-        s_.y_pdhg = (1.0 - alpha) * baseline_y + alpha * polished_y;
+        s_.y_pdhg = mlx_scalar_like(1.0 - alpha, baseline_y) * baseline_y +
+                    mlx_scalar_like(alpha, polished_y) * polished_y;
         s_.dual_slack =
-            (1.0 - alpha) * baseline_dual_slack + alpha * polished_dual_slack;
+            mlx_scalar_like(1.0 - alpha, baseline_dual_slack) *
+                baseline_dual_slack +
+            mlx_scalar_like(alpha, polished_dual_slack) * polished_dual_slack;
         mx::eval(s_.y_pdhg, s_.dual_slack);
         mlx_compute_residual();
         const double merit = std::max(
@@ -2450,8 +2469,11 @@ void MlxPdlpSolver::mlx_dual_feasibility_polish() {
         }
     }
     s_.y_pdhg = combined_y;
-    s_.dual_slack = (1.0 - combined_alpha) * baseline_dual_slack +
-                    combined_alpha * polished_dual_slack;
+    s_.dual_slack =
+        mlx_scalar_like(1.0 - combined_alpha, baseline_dual_slack) *
+            baseline_dual_slack +
+        mlx_scalar_like(combined_alpha, polished_dual_slack) *
+            polished_dual_slack;
     mx::eval(s_.y_pdhg, s_.dual_slack);
     mlx_compute_residual();
 
@@ -2511,7 +2533,7 @@ void MlxPdlpSolver::mlx_compute_infeasibility_information() {
     // Normalize to unit inf-norm
     double p_ray_inf_norm = mlx_norm_inf(primal_ray);
     if (p_ray_inf_norm > 1e-14) {
-        primal_ray = primal_ray / p_ray_inf_norm;
+        primal_ray = primal_ray / mlx_scalar_like(p_ray_inf_norm, primal_ray);
         mx::eval(primal_ray);
     }
 
@@ -2539,7 +2561,7 @@ void MlxPdlpSolver::mlx_compute_infeasibility_information() {
 
     double d_ray_inf_norm = mlx_norm_inf(dual_ray);
     if (d_ray_inf_norm > 1e-14) {
-        dual_ray = dual_ray / d_ray_inf_norm;
+        dual_ray = dual_ray / mlx_scalar_like(d_ray_inf_norm, dual_ray);
         mx::eval(dual_ray);
     }
 
@@ -2611,10 +2633,6 @@ void MlxPdlpSolver::mlx_perform_restart() {
             s_.primal_weight = s_.hpr_best_weight;
         }
         s_.hpr_last_gap = s_.fixed_point_error;
-        if (params_.verbose) {
-            printf("    restart weight: %.6e -> %.6e, ratio=%.6e, dist=(%.6e, %.6e)\n",
-                   old_primal_weight, s_.primal_weight, ratio_infeas, primal_dist, dual_dist);
-        }
     } else {
     // Keep the PID controller on cuPDLPx's projection-slack residual. Exported
     // certificate metrics are stricter and appropriate for stopping/auditing,
@@ -2906,14 +2924,19 @@ void MlxPdlpSolver::mlx_display_final_log() {
 // Result extraction
 // ---------------------------------------------------------------------------
 
-void MlxPdlpSolver::recompute_original_certificate(mlxpdlp_result_t *result) {
+double MlxPdlpSolver::recompute_original_certificate(mlxpdlp_result_t *result) {
+    auto demote_unverifiable_optimal = [result]() {
+        if (result && result->termination_reason == TERMINATION_REASON_OPTIMAL)
+            result->termination_reason = TERMINATION_REASON_UNSPECIFIED;
+    };
     if (!result || !result->primal_solution || !result->dual_solution ||
         !result->reduced_cost || result->num_variables != original_num_variables_ ||
         result->num_constraints != original_num_constraints_ ||
         original_row_ptr_.size() != static_cast<size_t>(original_num_constraints_ + 1) ||
         original_col_ind_.size() != static_cast<size_t>(original_num_nonzeros_) ||
         original_matrix_values_.size() != static_cast<size_t>(original_num_nonzeros_)) {
-        return;
+        demote_unverifiable_optimal();
+        return inf();
     }
 
     const int m = original_num_constraints_;
@@ -2950,8 +2973,10 @@ void MlxPdlpSolver::recompute_original_certificate(mlxpdlp_result_t *result) {
         for (int entry = original_row_ptr_[static_cast<size_t>(row)];
              entry < original_row_ptr_[static_cast<size_t>(row + 1)]; ++entry) {
             const int column = original_col_ind_[static_cast<size_t>(entry)];
-            if (column < 0 || column >= n)
-                return;
+            if (column < 0 || column >= n) {
+                demote_unverifiable_optimal();
+                return inf();
+            }
             const long double coefficient =
                 original_matrix_values_[static_cast<size_t>(entry)];
             ax[static_cast<size_t>(row)] +=
@@ -2962,6 +2987,8 @@ void MlxPdlpSolver::recompute_original_certificate(mlxpdlp_result_t *result) {
 
     long double primal_residual_sq = 0.0L;
     long double constraint_bound_norm_sq = 0.0L;
+    long double variable_bound_violation_sq = 0.0L;
+    long double variable_bound_norm_sq = 0.0L;
     long double dual_residual_sq = 0.0L;
     long double exact_dual_residual_sq = 0.0L;
     long double objective_norm_sq = 0.0L;
@@ -3000,6 +3027,23 @@ void MlxPdlpSolver::recompute_original_certificate(mlxpdlp_result_t *result) {
         const double coefficient = original_objective_[static_cast<size_t>(column)];
         const double lower = original_variable_lower_bound_[static_cast<size_t>(column)];
         const double upper = original_variable_upper_bound_[static_cast<size_t>(column)];
+        const double primal = result->primal_solution[column];
+        if (!std::isfinite(primal)) {
+            variable_bound_violation_sq =
+                std::numeric_limits<long double>::infinity();
+        } else {
+            long double violation = 0.0L;
+            if (primal < lower)
+                violation = static_cast<long double>(lower) - primal;
+            else if (primal > upper)
+                violation = static_cast<long double>(primal) - upper;
+            add_square(variable_bound_violation_sq, violation);
+        }
+        if (std::isfinite(lower))
+            add_square(variable_bound_norm_sq, lower);
+        if (std::isfinite(upper))
+            add_square(variable_bound_norm_sq, upper);
+
         const long double raw = static_cast<long double>(coefficient) -
                                 aty[static_cast<size_t>(column)];
         const long double reduced_cost = result->reduced_cost[column];
@@ -3066,13 +3110,32 @@ void MlxPdlpSolver::recompute_original_certificate(mlxpdlp_result_t *result) {
         result->objective_gap /
         (1.0 + std::fabs(result->primal_objective_value) +
          std::fabs(result->dual_objective_value));
+    const double relative_variable_bound_violation =
+        std::sqrt(static_cast<double>(variable_bound_violation_sq)) /
+        (1.0 + std::sqrt(static_cast<double>(variable_bound_norm_sq)));
 
     const auto &criteria = params_.termination_criteria;
-    if (result->relative_primal_residual < criteria.eps_feasible_relative &&
+    const bool certificate_is_optimal =
+        std::isfinite(result->relative_primal_residual) &&
+        std::isfinite(result->relative_dual_residual) &&
+        std::isfinite(result->relative_objective_gap) &&
+        std::isfinite(relative_variable_bound_violation) &&
+        result->relative_primal_residual < criteria.eps_feasible_relative &&
+        relative_variable_bound_violation < criteria.eps_feasible_relative &&
         result->relative_dual_residual < criteria.eps_feasible_relative &&
-        result->relative_objective_gap < criteria.eps_optimal_relative) {
+        result->relative_objective_gap < criteria.eps_optimal_relative;
+    if (certificate_is_optimal) {
         result->termination_reason = TERMINATION_REASON_OPTIMAL;
+    } else if ((!std::isfinite(relative_variable_bound_violation) ||
+                relative_variable_bound_violation >=
+                    criteria.eps_feasible_relative) &&
+               result->termination_reason == TERMINATION_REASON_OPTIMAL) {
+        // Existing stopping metrics are reported independently from this
+        // original-model audit. Preserve their historical status semantics,
+        // but never allow an OPTIMAL stamp to survive a failed bound check.
+        result->termination_reason = TERMINATION_REASON_UNSPECIFIED;
     }
+    return relative_variable_bound_violation;
 }
 
 void MlxPdlpSolver::polish_original_dual_certificate(mlxpdlp_result_t *result) {
@@ -3090,14 +3153,20 @@ mlxpdlp_result_t *MlxPdlpSolver::extract_result() {
     result->num_nonzeros = s_.nnz;
 
     // Unscale solutions: x = x_pdhg / var_rescale / con_bound_rescale
-    auto x_unscaled = s_.x_pdhg / s_.var_rescale / s_.con_bound_rescale;
+    auto x_unscaled =
+        s_.x_pdhg / s_.var_rescale /
+        mlx_scalar_like(s_.con_bound_rescale, s_.x_pdhg);
     // y = y_pdhg / con_rescale / obj_vec_rescale
-    auto y_unscaled = s_.y_pdhg / s_.con_rescale / s_.obj_vec_rescale;
+    auto y_unscaled =
+        s_.y_pdhg / s_.con_rescale /
+        mlx_scalar_like(s_.obj_vec_rescale, s_.y_pdhg);
     // Export PDHG's complementary projection multiplier. When presolve is
     // active apply_postsolve independently rebuilds the exact c-A^T y seed in
     // host precision, so a host-corrected reduced multiplier is never replaced
     // by stale fp32 device state.
-    auto rc_raw = s_.dual_slack * s_.var_rescale / s_.obj_vec_rescale;
+    auto rc_raw =
+        s_.dual_slack * s_.var_rescale /
+        mlx_scalar_like(s_.obj_vec_rescale, s_.dual_slack);
 
     // CUDA reference: clamp reduced cost for free variables
     // If var_lb is -inf: rc = min(rc, 0)
@@ -3237,11 +3306,21 @@ void MlxPdlpSolver::apply_postsolve(mlxpdlp_result_t *result) {
         result->dual_solution = copy_vector(solution.dual);
         result->reduced_cost = copy_vector(solution.reduced_cost);
     };
+    struct CandidateAudit {
+        double merit;
+        double feasibility;
+    };
     auto audited_merit = [&]() {
-        recompute_original_certificate(result);
-        return std::max({result->relative_primal_residual,
-                         result->relative_dual_residual,
-                         result->relative_objective_gap});
+        const double variable_bound_violation =
+            recompute_original_certificate(result);
+        return CandidateAudit{
+            std::max({result->relative_primal_residual,
+                      variable_bound_violation,
+                      result->relative_dual_residual,
+                      result->relative_objective_gap}),
+            std::max({result->relative_primal_residual,
+                      variable_bound_violation,
+                      result->relative_dual_residual})};
     };
 
     // The pointers were deleted above and are installed afresh for each
@@ -3251,15 +3330,13 @@ void MlxPdlpSolver::apply_postsolve(mlxpdlp_result_t *result) {
     result->dual_solution = nullptr;
     result->reduced_cost = nullptr;
     install_solution(exact_solution);
-    const double exact_merit = audited_merit();
-    const double exact_feasibility =
-        std::max(result->relative_primal_residual,
-                 result->relative_dual_residual);
+    const CandidateAudit exact_audit = audited_merit();
     install_solution(projection_solution);
-    const double projection_merit = audited_merit();
-    const double projection_feasibility =
-        std::max(result->relative_primal_residual,
-                 result->relative_dual_residual);
+    const CandidateAudit projection_audit = audited_merit();
+    const double exact_merit = exact_audit.merit;
+    const double exact_feasibility = exact_audit.feasibility;
+    const double projection_merit = projection_audit.merit;
+    const double projection_feasibility = projection_audit.feasibility;
     bool use_projection =
         std::isfinite(projection_merit) &&
         (!std::isfinite(exact_merit) || projection_merit < exact_merit);
@@ -3493,8 +3570,10 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
         if (has_reduced_cost_start_) {
             auto reduced_cost_unscaled = mlx_array_from_doubles(
                 warm_reduced_cost_.data(), s_.n, s_.obj.dtype());
-            s_.dual_slack = reduced_cost_unscaled * s_.obj_vec_rescale /
-                            s_.var_rescale;
+            s_.dual_slack =
+                reduced_cost_unscaled *
+                mlx_scalar_like(s_.obj_vec_rescale, reduced_cost_unscaled) /
+                s_.var_rescale;
         } else {
             auto reduced_cost_raw = s_.obj - s_.ATy;
             auto reduced_cost_lb_adjusted = mx::where(

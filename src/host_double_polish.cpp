@@ -173,7 +173,28 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
         return;
     }
 
+    // Projection normally keeps PDHG iterates inside the working bounds, but
+    // warm starts and postsolve reconstruction can bypass that device-side
+    // projection. Repair the host point before the three residual metrics are
+    // allowed to short-circuit polishing. The caller re-audits the resulting
+    // certificate on the relevant model after this routine returns.
+    bool repaired_variable_bound = false;
+    for (int column = 0; column < n; ++column) {
+        double &primal = result->primal_solution[column];
+        if (!std::isfinite(primal))
+            continue;
+        const double projected =
+            std::clamp(primal,
+                       model_variable_lower[static_cast<size_t>(column)],
+                       model_variable_upper[static_cast<size_t>(column)]);
+        if (projected != primal) {
+            primal = projected;
+            repaired_variable_bound = true;
+        }
+    }
+
     const bool already_optimal =
+        !repaired_variable_bound &&
         result->relative_primal_residual < target_feasibility &&
         result->relative_dual_residual < target_feasibility &&
         result->relative_objective_gap < target_optimality;
