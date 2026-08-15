@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "mlx/allocator.h"
 #include "mlx/backend/cpu/encoder.h"
+#include "mlx/backend/gpu/device_info.h"
 #include "mlx/fast.h"
 #include "mlx/primitives.h"
 
@@ -44,6 +45,7 @@ limitations under the License.
 #include <random>
 #include <stdexcept>
 #include <utility>
+#include <variant>
 
 namespace mlxpdlp {
 
@@ -256,6 +258,7 @@ void mlxpdlp_set_default_parameters(pdhg_parameters_t *p) {
     p->presolve_finite_bound_tightening = true;
     p->presolve_primal_propagation = false;
     p->matrix_zero_tol = 1e-9;
+    p->metal_fused_kernels = true;
 }
 
 void mlxpdlp_result_free(mlxpdlp_result_t *result) {
@@ -858,7 +861,41 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
         // wins by coalescing the CSR stream. Rows just above 64 need that path
         // even sooner: the adaptive fallback otherwise assigns all 256 threads
         // and eight barriers to only 65 products.
-        constexpr int simdgroup_short_matrix_nnz_threshold = 8 * 1024 * 1024;
+        //
+        // The aggregate-work cutoff is device-tuned: the validated 8M-nonzero
+        // default was measured on an M3 Max, and wider/newer GPUs reach the
+        // SIMD-group crossover at smaller aggregate work while narrower ones
+        // stay on the adaptive path longer. MLXPDLP_SPMV_SIMD_NNZ_THRESHOLD
+        // overrides the derived value explicitly.
+        auto simdgroup_nnz_threshold = []() -> int64_t {
+            const char *override_value = std::getenv("MLXPDLP_SPMV_SIMD_NNZ_THRESHOLD");
+            if (override_value && *override_value) {
+                const double parsed = std::atof(override_value);
+                if (parsed > 0.0) {
+                    return static_cast<int64_t>(parsed);
+                }
+            }
+            double family_factor = 1.0;
+            try {
+                const auto &info = mx::gpu::device_info(0);
+                auto name_it = info.find("device_name");
+                if (name_it != info.end()) {
+                    const std::string &name = std::get<std::string>(name_it->second);
+                    if (name.find("M4") != std::string::npos) {
+                        family_factor = 0.75;
+                    } else if (name.find("M3") != std::string::npos) {
+                        family_factor = 1.0;
+                    } else if (name.find("M2") != std::string::npos) {
+                        family_factor = 1.25;
+                    } else if (name.find("M1") != std::string::npos) {
+                        family_factor = 1.5;
+                    }
+                }
+            } catch (...) {
+                // Keep the validated default when device introspection fails.
+            }
+            return static_cast<int64_t>(8.0 * 1024.0 * 1024.0 * family_factor);
+        }();
         if (profile.max_row_nonzeros <= scalar_row_max_nonzeros) {
             return SparseMetalSpmvStrategy::scalar_rows;
         }
@@ -871,8 +908,7 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
         const bool many_rows_cross_adaptive_cutoff =
             static_cast<int64_t>(profile.rows_over_adaptive_cutoff) * 4 >=
             static_cast<int64_t>(profile.rows);
-        const bool large_uniform_short_matrix =
-            profile.nonzeros >= simdgroup_short_matrix_nnz_threshold;
+        const bool large_uniform_short_matrix = nonzeros >= simdgroup_nnz_threshold;
         if (medium_workload &&
             (many_rows_cross_adaptive_cutoff || large_uniform_short_matrix)) {
             return SparseMetalSpmvStrategy::simdgroup_rows;
@@ -963,10 +999,11 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
                              (static_cast<double>(s_.m) + s_.n + 2.0) * sizeof(int32_t)) /
                             (1024.0 * 1024.0);
         printf("  sparse Metal SpMV enabled (CSR + transpose CSR: %.2f MiB; "
-               "strategies A=%s, A^T=%s; adaptive work items A=%d, A^T=%d)\n",
+               "strategies A=%s, A^T=%s; adaptive work items A=%d, A^T=%d; "
+               "fused iteration batch=%d)\n",
                sparse_mib, strategy_name(s_.sparse_a_spmv_strategy),
                strategy_name(s_.sparse_at_spmv_strategy), sparse_a_work_item_count_,
-               sparse_at_work_item_count_);
+               sparse_at_work_item_count_, fused_eval_batch_size());
     }
 }
 
@@ -1065,7 +1102,7 @@ mx::array MlxPdlpSolver::sparse_matvec(const mx::array &row_ptr, const mx::array
                 int begin = row_starts[row];
                 int end = row_starts[row + 1];
                 for (int k = begin; k < end; ++k) {
-                    total += nonzeros[k] * vector[column_indices[k]];
+                    total = fma(nonzeros[k], vector[column_indices[k]], total);
                 }
                 output[row] = total;
             )");
@@ -1088,7 +1125,7 @@ mx::array MlxPdlpSolver::sparse_matvec(const mx::array &row_ptr, const mx::array
                 int end = row_starts[row + 1];
                 for (int k = begin + int(lane); k < end;
                      k += int(simdgroup_width)) {
-                    partial += nonzeros[k] * vector[column_indices[k]];
+                    partial = fma(nonzeros[k], vector[column_indices[k]], partial);
                 }
                 float total = simd_sum(partial);
                 if (lane == 0) {
@@ -1122,7 +1159,7 @@ mx::array MlxPdlpSolver::sparse_matvec(const mx::array &row_ptr, const mx::array
                 int end = row_starts[row + 1];
                 for (int k = begin + int(local_thread); k < end;
                      k += int(threadgroup_width)) {
-                    partial += nonzeros[k] * vector[column_indices[k]];
+                    partial = fma(nonzeros[k], vector[column_indices[k]], partial);
                 }
                 partials[local_thread] = partial;
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1143,7 +1180,7 @@ mx::array MlxPdlpSolver::sparse_matvec(const mx::array &row_ptr, const mx::array
                     int begin = row_starts[row];
                     int end = row_starts[row + 1];
                     for (int k = begin; k < end; ++k) {
-                        total += nonzeros[k] * vector[column_indices[k]];
+                        total = fma(nonzeros[k], vector[column_indices[k]], total);
                     }
                     output[row] = total;
                 }
@@ -1156,6 +1193,338 @@ mx::array MlxPdlpSolver::sparse_matvec(const mx::array &row_ptr, const mx::array
                            {{rows}}, {mx::float32}, {grid, 1, 1},
                            {threadgroup, 1, 1}, {}, std::nullopt, false,
                            s_.stream)[0];
+}
+
+// ---------------------------------------------------------------------------
+// Fused sparse Metal PDHG half-steps
+// ---------------------------------------------------------------------------
+//
+// Each fused kernel performs one full half-step of the PDHG iteration:
+// CSR SpMV + scaled gradient step + bound projection + reflection +
+// Halpern weighting, writing x_cur/x_ref (primal) or y_cur/y_ref (dual)
+// plus the major-iteration snapshot arrays in a single dispatch. The update
+// bodies replicate the MLX expression sequences in
+// mlx_compute_next_primal/_dual so the fused path stays numerically
+// comparable with the unfused one. Evaluation of both half-step kernels of
+// one iteration is deferred to a single mx::eval in mlx_compute_next_dual.
+
+namespace {
+
+// MSL header shared by all six fused kernels. The scalar block is
+// {step, reflection_coefficient, halpern_weight, major_flag} in float32.
+const char *fused_step_header() {
+    static const std::string header = R"(
+inline void fused_primal_update(
+    uint row,
+    float product,
+    const device float* x_cur, const device float* x_init,
+    const device float* obj, const device float* var_lb, const device float* var_ub,
+    const constant float* scalars,
+    device float* x_cur_out, device float* x_ref_out,
+    device float* x_pdhg_out, device float* dual_slack_out) {
+    float step = scalars[0];
+    float rc = scalars[1];
+    float weight = scalars[2];
+    float temp = x_cur[row] - step * (obj[row] - product);
+    float proj = min(max(temp, var_lb[row]), var_ub[row]);
+    float xref = 2.0f * proj - x_cur[row];
+    float reflected = rc * xref + (1.0f - rc) * x_cur[row];
+    x_cur_out[row] = weight * reflected + (1.0f - weight) * x_init[row];
+    x_ref_out[row] = xref;
+    if (scalars[3] != 0.0f) {
+        x_pdhg_out[row] = proj;
+        dual_slack_out[row] = (proj - temp) / step;
+    }
+}
+
+inline void fused_dual_update(
+    uint row,
+    float product,
+    const device float* y_cur, const device float* y_init,
+    const device float* con_lb, const device float* con_ub,
+    const constant float* scalars,
+    device float* y_cur_out, device float* y_ref_out,
+    device float* y_pdhg_out) {
+    float step = scalars[0];
+    float rc = scalars[1];
+    float weight = scalars[2];
+    float temp = y_cur[row] / step - product;
+    float proj = min(max(temp, -con_ub[row]), -con_lb[row]);
+    float ycand = (temp - proj) * step;
+    float yref = 2.0f * ycand - y_cur[row];
+    float reflected = rc * yref + (1.0f - rc) * y_cur[row];
+    y_cur_out[row] = weight * reflected + (1.0f - weight) * y_init[row];
+    y_ref_out[row] = yref;
+    if (scalars[3] != 0.0f) {
+        y_pdhg_out[row] = ycand;
+    }
+}
+)";
+    return header.c_str();
+}
+std::string replace_all(std::string text, const std::string &from, const std::string &to) {
+    size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::string::npos) {
+        text.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+    return text;
+}
+
+// Assemble the kernel body for one SpMV dispatch strategy. The RS/CI/VALS
+// tokens name the CSR arrays, VEC the operand vector, WO/WR the adaptive work
+// arrays, UPD the update call using register accumulator acc, and UPD_LONG
+// the update call using the reduced threadgroup value partials[0].
+std::string fused_body(const char *rs, const char *ci, const char *vals,
+                       const char *wo, const char *wr, const char *vec,
+                       SparseMetalSpmvStrategy strategy,
+                       const std::string &update_acc,
+                       const std::string &update_partials) {
+    std::string body;
+    switch (strategy) {
+    case SparseMetalSpmvStrategy::scalar_rows:
+        body = R"(
+            uint row = thread_position_in_grid.x;
+            float acc = 0.0f;
+            int begin = $RS$[row];
+            int end = $RS$[row + 1];
+            for (int k = begin; k < end; ++k) {
+                acc = fma($VALS$[k], $VEC$[$CI$[k]], acc);
+            }
+            $UPD$
+        )";
+        break;
+    case SparseMetalSpmvStrategy::simdgroup_rows:
+        body = R"(
+            constexpr uint simdgroup_width = 32;
+            uint lane = thread_index_in_simdgroup;
+            uint row = thread_position_in_grid.x / simdgroup_width;
+            float partial = 0.0f;
+            int begin = $RS$[row];
+            int end = $RS$[row + 1];
+            for (int k = begin + int(lane); k < end; k += int(simdgroup_width)) {
+                partial = fma($VALS$[k], $VEC$[$CI$[k]], partial);
+            }
+            float acc = simd_sum(partial);
+            if (lane == 0) {
+                $UPD$
+            }
+        )";
+        break;
+    case SparseMetalSpmvStrategy::adaptive:
+        body = R"(
+            uint local_thread = thread_index_in_threadgroup;
+            uint threadgroup_width = threads_per_threadgroup.x;
+            uint work_item = threadgroup_position_in_grid.x;
+            int descriptor_begin = $WO$[work_item];
+            int descriptor_end = $WO$[work_item + 1];
+            int first_row = $WR$[descriptor_begin];
+            threadgroup float partials[256];
+            if (first_row < 0) {
+                uint row = uint(-first_row - 1);
+                float partial = 0.0f;
+                int begin = $RS$[row];
+                int end = $RS$[row + 1];
+                for (int k = begin + int(local_thread); k < end;
+                     k += int(threadgroup_width)) {
+                    partial = fma($VALS$[k], $VEC$[$CI$[k]], partial);
+                }
+                partials[local_thread] = partial;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                for (uint stride = 128; stride > 0; stride >>= 1) {
+                    if (local_thread < stride) {
+                        partials[local_thread] += partials[local_thread + stride];
+                    }
+                    threadgroup_barrier(mem_flags::mem_threadgroup);
+                }
+                if (local_thread == 0) {
+                    $UPD_LONG$
+                }
+            } else {
+                int descriptor = descriptor_begin + int(local_thread);
+                if (descriptor < descriptor_end) {
+                    uint row = uint($WR$[descriptor]);
+                    float acc = 0.0f;
+                    int begin = $RS$[row];
+                    int end = $RS$[row + 1];
+                    for (int k = begin; k < end; ++k) {
+                        acc = fma($VALS$[k], $VEC$[$CI$[k]], acc);
+                    }
+                    $UPD$
+                }
+            }
+        )";
+        break;
+    }
+    body = replace_all(std::move(body), "$RS$", rs);
+    body = replace_all(std::move(body), "$CI$", ci);
+    body = replace_all(std::move(body), "$VALS$", vals);
+    body = replace_all(std::move(body), "$WO$", wo);
+    body = replace_all(std::move(body), "$WR$", wr);
+    body = replace_all(std::move(body), "$VEC$", vec);
+    body = replace_all(std::move(body), "$UPD_LONG$", update_partials);
+    body = replace_all(std::move(body), "$UPD$", update_acc);
+    return body;
+}
+const std::string primal_update_acc =
+    "fused_primal_update(row, acc, x_cur, x_init, obj, var_lb, var_ub, scalars, "
+    "x_cur_out, x_ref_out, x_pdhg_out, dual_slack_out);";
+const std::string primal_update_partials =
+    "fused_primal_update(row, partials[0], x_cur, x_init, obj, var_lb, var_ub, "
+    "scalars, x_cur_out, x_ref_out, x_pdhg_out, dual_slack_out);";
+const std::string dual_update_acc =
+    "fused_dual_update(row, acc, y_cur, y_init, con_lb, con_ub, scalars, "
+    "y_cur_out, y_ref_out, y_pdhg_out);";
+const std::string dual_update_partials =
+    "fused_dual_update(row, partials[0], y_cur, y_init, con_lb, con_ub, scalars, "
+    "y_cur_out, y_ref_out, y_pdhg_out);";
+
+} // namespace
+
+std::vector<mx::array> MlxPdlpSolver::fused_primal_step(const mx::array &scalars) {
+    constexpr int threadgroup_width = 256;
+    switch (s_.sparse_at_spmv_strategy) {
+    case SparseMetalSpmvStrategy::scalar_rows: {
+        static const auto kernel = mx::fast::metal_kernel(
+            "mlxpdlp_fused_primal_scalar_rows",
+            {"at_row_starts", "at_col_ind", "at_values", "y_cur", "x_cur",
+             "x_init", "obj", "var_lb", "var_ub", "scalars"},
+            {"x_cur_out", "x_ref_out", "x_pdhg_out", "dual_slack_out"},
+            fused_body("at_row_starts", "at_col_ind", "at_values",
+                       "at_work_offsets", "at_work_rows", "y_cur",
+                       SparseMetalSpmvStrategy::scalar_rows, primal_update_acc,
+                       primal_update_partials),
+            fused_step_header());
+        return kernel({sparse_at_row_ptr_, sparse_at_col_ind_, sparse_at_values_,
+                       s_.y_cur, s_.x_cur, s_.x_init, s_.obj, s_.var_lb, s_.var_ub,
+                       scalars},
+                      {{s_.n}, {s_.n}, {s_.n}, {s_.n}},
+                      {mx::float32, mx::float32, mx::float32, mx::float32},
+                      {s_.n, 1, 1}, {threadgroup_width, 1, 1}, {}, std::nullopt,
+                      false, s_.stream);
+    }
+    case SparseMetalSpmvStrategy::simdgroup_rows: {
+        static const auto kernel = mx::fast::metal_kernel(
+            "mlxpdlp_fused_primal_simdgroup_rows",
+            {"at_row_starts", "at_col_ind", "at_values", "y_cur", "x_cur",
+             "x_init", "obj", "var_lb", "var_ub", "scalars"},
+            {"x_cur_out", "x_ref_out", "x_pdhg_out", "dual_slack_out"},
+            fused_body("at_row_starts", "at_col_ind", "at_values",
+                       "at_work_offsets", "at_work_rows", "y_cur",
+                       SparseMetalSpmvStrategy::simdgroup_rows, primal_update_acc,
+                       primal_update_partials),
+            fused_step_header());
+        return kernel({sparse_at_row_ptr_, sparse_at_col_ind_, sparse_at_values_,
+                       s_.y_cur, s_.x_cur, s_.x_init, s_.obj, s_.var_lb, s_.var_ub,
+                       scalars},
+                      {{s_.n}, {s_.n}, {s_.n}, {s_.n}},
+                      {mx::float32, mx::float32, mx::float32, mx::float32},
+                      {s_.n * 32, 1, 1}, {threadgroup_width, 1, 1}, {}, std::nullopt,
+                      false, s_.stream);
+    }
+    case SparseMetalSpmvStrategy::adaptive: {
+        static const auto kernel = mx::fast::metal_kernel(
+            "mlxpdlp_fused_primal_adaptive",
+            {"at_row_starts", "at_col_ind", "at_values", "at_work_offsets",
+             "at_work_rows", "y_cur", "x_cur", "x_init", "obj", "var_lb",
+             "var_ub", "scalars"},
+            {"x_cur_out", "x_ref_out", "x_pdhg_out", "dual_slack_out"},
+            fused_body("at_row_starts", "at_col_ind", "at_values",
+                       "at_work_offsets", "at_work_rows", "y_cur",
+                       SparseMetalSpmvStrategy::adaptive, primal_update_acc,
+                       primal_update_partials),
+            fused_step_header());
+        return kernel({sparse_at_row_ptr_, sparse_at_col_ind_, sparse_at_values_,
+                       sparse_at_work_offsets_, sparse_at_work_rows_, s_.y_cur,
+                       s_.x_cur, s_.x_init, s_.obj, s_.var_lb, s_.var_ub, scalars},
+                      {{s_.n}, {s_.n}, {s_.n}, {s_.n}},
+                      {mx::float32, mx::float32, mx::float32, mx::float32},
+                      {sparse_at_work_item_count_ * threadgroup_width, 1, 1},
+                      {threadgroup_width, 1, 1}, {}, std::nullopt, false, s_.stream);
+    }
+    }
+    throw std::logic_error("unknown sparse Metal SpMV strategy for fused primal step");
+}
+std::vector<mx::array> MlxPdlpSolver::fused_dual_step(const mx::array &scalars) {
+    constexpr int threadgroup_width = 256;
+    switch (s_.sparse_a_spmv_strategy) {
+    case SparseMetalSpmvStrategy::scalar_rows: {
+        static const auto kernel = mx::fast::metal_kernel(
+            "mlxpdlp_fused_dual_scalar_rows",
+            {"a_row_starts", "a_col_ind", "a_values", "x_ref", "y_cur",
+             "y_init", "con_lb", "con_ub", "scalars"},
+            {"y_cur_out", "y_ref_out", "y_pdhg_out"},
+            fused_body("a_row_starts", "a_col_ind", "a_values", "a_work_offsets",
+                       "a_work_rows", "x_ref",
+                       SparseMetalSpmvStrategy::scalar_rows, dual_update_acc,
+                       dual_update_partials),
+            fused_step_header());
+        return kernel({sparse_a_row_ptr_, sparse_a_col_ind_, sparse_a_values_,
+                       s_.x_ref, s_.y_cur, s_.y_init, s_.con_lb, s_.con_ub, scalars},
+                      {{s_.m}, {s_.m}, {s_.m}},
+                      {mx::float32, mx::float32, mx::float32},
+                      {s_.m, 1, 1}, {threadgroup_width, 1, 1}, {}, std::nullopt,
+                      false, s_.stream);
+    }
+    case SparseMetalSpmvStrategy::simdgroup_rows: {
+        static const auto kernel = mx::fast::metal_kernel(
+            "mlxpdlp_fused_dual_simdgroup_rows",
+            {"a_row_starts", "a_col_ind", "a_values", "x_ref", "y_cur",
+             "y_init", "con_lb", "con_ub", "scalars"},
+            {"y_cur_out", "y_ref_out", "y_pdhg_out"},
+            fused_body("a_row_starts", "a_col_ind", "a_values", "a_work_offsets",
+                       "a_work_rows", "x_ref",
+                       SparseMetalSpmvStrategy::simdgroup_rows, dual_update_acc,
+                       dual_update_partials),
+            fused_step_header());
+        return kernel({sparse_a_row_ptr_, sparse_a_col_ind_, sparse_a_values_,
+                       s_.x_ref, s_.y_cur, s_.y_init, s_.con_lb, s_.con_ub, scalars},
+                      {{s_.m}, {s_.m}, {s_.m}},
+                      {mx::float32, mx::float32, mx::float32},
+                      {s_.m * 32, 1, 1}, {threadgroup_width, 1, 1}, {}, std::nullopt,
+                      false, s_.stream);
+    }
+    case SparseMetalSpmvStrategy::adaptive: {
+        static const auto kernel = mx::fast::metal_kernel(
+            "mlxpdlp_fused_dual_adaptive",
+            {"a_row_starts", "a_col_ind", "a_values", "a_work_offsets",
+             "a_work_rows", "x_ref", "y_cur", "y_init", "con_lb", "con_ub",
+             "scalars"},
+            {"y_cur_out", "y_ref_out", "y_pdhg_out"},
+            fused_body("a_row_starts", "a_col_ind", "a_values", "a_work_offsets",
+                       "a_work_rows", "x_ref",
+                       SparseMetalSpmvStrategy::adaptive, dual_update_acc,
+                       dual_update_partials),
+            fused_step_header());
+        return kernel({sparse_a_row_ptr_, sparse_a_col_ind_, sparse_a_values_,
+                       sparse_a_work_offsets_, sparse_a_work_rows_, s_.x_ref,
+                       s_.y_cur, s_.y_init, s_.con_lb, s_.con_ub, scalars},
+                      {{s_.m}, {s_.m}, {s_.m}},
+                      {mx::float32, mx::float32, mx::float32},
+                      {sparse_a_work_item_count_ * threadgroup_width, 1, 1},
+                      {threadgroup_width, 1, 1}, {}, std::nullopt, false, s_.stream);
+    }
+    }
+    throw std::logic_error("unknown sparse Metal SpMV strategy for fused dual step");
+}
+
+int MlxPdlpSolver::fused_eval_batch_size() const {
+    if (!params_.metal_fused_kernels || !s_.sparse_metal_active) {
+        return 1;
+    }
+    // Each fused minor iteration materializes roughly (2n + 2m) floats plus a
+    // 4-float scalar block; major iterations add (2n + m) snapshot floats.
+    // Bound the lazy batch graph to a fixed intermediate footprint so large
+    // problems do not accumulate hundreds of iteration outputs in memory.
+    constexpr double target_bytes = 64.0 * 1024.0 * 1024.0;
+    constexpr int max_batch = 16;
+    const double per_iteration_bytes =
+        static_cast<double>(2LL * s_.n + 2LL * s_.m) * sizeof(float);
+    if (per_iteration_bytes <= 0.0) {
+        return 1;
+    }
+    int batch = static_cast<int>(target_bytes / per_iteration_bytes);
+    return std::clamp(batch, 1, max_batch);
 }
 
 mx::array MlxPdlpSolver::sparse_cpu_matvec(const mx::array &x, bool transpose,
@@ -1766,6 +2135,23 @@ void MlxPdlpSolver::mlx_compute_next_primal(int k_offset, bool is_major) {
     double weight = static_cast<double>(k) / static_cast<double>(k + 1);
     double rc = params_.reflection_coefficient;
 
+    if (params_.metal_fused_kernels && s_.sparse_metal_active) {
+        // One fused Metal kernel computes A^T*y plus the whole primal step.
+        // Evaluation is deferred to mlx_compute_next_dual so a single eval
+        // covers both half-step kernels of this iteration.
+        const double scalars_host[4] = {s_.step_size_primal, rc, weight,
+                                        is_major ? 1.0 : 0.0};
+        auto scalars = mlx_array_from_doubles(scalars_host, 4, mx::float32);
+        auto out = fused_primal_step(scalars);
+        s_.x_cur = out[0];
+        s_.x_ref = out[1];
+        if (is_major) {
+            s_.x_pdhg = out[2];
+            s_.dual_slack = out[3];
+        }
+        return;
+    }
+
     // ATy = A^T * y_cur
     s_.ATy = mat_ATx(s_.y_cur);
 
@@ -1799,10 +2185,35 @@ void MlxPdlpSolver::mlx_compute_next_primal(int k_offset, bool is_major) {
     }
 }
 
-void MlxPdlpSolver::mlx_compute_next_dual(int k_offset, bool is_major) {
+void MlxPdlpSolver::mlx_compute_next_dual(int k_offset, bool is_major,
+                                        bool eval_now) {
     int k = s_.inner_count + k_offset;
     double weight = static_cast<double>(k) / static_cast<double>(k + 1);
     double rc = params_.reflection_coefficient;
+
+    if (params_.metal_fused_kernels && s_.sparse_metal_active) {
+        // One fused Metal kernel computes A*x_ref plus the whole dual step.
+        // When eval_now is set, one mx::eval materializes both half-step
+        // kernels of the current batch; otherwise they stay in the lazy graph.
+        const double scalars_host[4] = {s_.step_size_dual, rc, weight,
+                                        is_major ? 1.0 : 0.0};
+        auto scalars = mlx_array_from_doubles(scalars_host, 4, mx::float32);
+        auto out = fused_dual_step(scalars);
+        s_.y_cur = out[0];
+        s_.y_ref = out[1];
+        if (is_major) {
+            s_.y_pdhg = out[2];
+        }
+        if (eval_now) {
+            if (is_major) {
+                mx::eval(s_.x_cur, s_.x_ref, s_.x_pdhg, s_.dual_slack, s_.y_cur,
+                         s_.y_ref, s_.y_pdhg);
+            } else {
+                mx::eval(s_.x_cur, s_.x_ref, s_.y_cur, s_.y_ref);
+            }
+        }
+        return;
+    }
 
     // Ax = A * x_ref
     s_.Ax = mat_Ax(s_.x_ref);
@@ -2231,7 +2642,7 @@ void MlxPdlpSolver::mlx_primal_feasibility_polish() {
         mx::eval(s_.x_best, s_.y_best, s_.dual_slack_best);
         if (s_.relative_primal_residual < criteria.eps_feasible_relative &&
             s_.relative_dual_residual < criteria.eps_feasible_relative &&
-            s_.relative_objective_gap < criteria.eps_optimal_relative) {
+            std::fabs(s_.relative_objective_gap) < criteria.eps_optimal_relative) {
             s_.termination_reason = TERMINATION_REASON_OPTIMAL;
         }
     } else {
@@ -2495,7 +2906,7 @@ void MlxPdlpSolver::mlx_dual_feasibility_polish() {
         mx::eval(s_.x_best, s_.y_best, s_.dual_slack_best);
         if (s_.relative_primal_residual < criteria.eps_feasible_relative &&
             s_.relative_dual_residual < criteria.eps_feasible_relative &&
-            s_.relative_objective_gap < criteria.eps_optimal_relative) {
+            std::fabs(s_.relative_objective_gap) < criteria.eps_optimal_relative) {
             s_.termination_reason = TERMINATION_REASON_OPTIMAL;
         }
     } else {
@@ -2516,67 +2927,96 @@ void MlxPdlpSolver::mlx_dual_feasibility_polish() {
 }
 
 void MlxPdlpSolver::mlx_compute_infeasibility_information() {
-    // Compute infeasibility measures
-    // Primal ray: project delta_x for infeasibility
+    // Without constraints there can be no primal-infeasibility certificate and
+    // without variables no dual-infeasibility certificate; the rays also
+    // degenerate to empty arrays that MLX reductions reject.
+    if (s_.m == 0 || s_.n == 0) {
+        working_dual_ray_objective_ = 0.0;
+        working_primal_ray_objective_ = 0.0;
+        s_.max_primal_ray_infeasibility = 0.0;
+        s_.max_dual_ray_infeasibility = 0.0;
+        s_.primal_ray_linear_objective = 0.0;
+        s_.dual_ray_objective = 0.0;
+        return;
+    }
+
+    // Infeasibility certificates via Farkas separation on the box-constrained
+    // formulation, computed on the sign-projected fixed-point deltas. The
+    // residual measures recession-cone membership, and the objective is the
+    // full separation gap, so the certificate is valid (and silent) on
+    // feasible problems even when every bound mask is vacuous.
+    //
+    // Primal ray r (dual-infeasibility certificate): r must lie in the
+    // recession cone of the variable box and A r in the recession cone of the
+    // constraint box, with c^T r < 0. For a box [l, u] the recession cone is
+    //   r_j >= 0 if (u_j = +inf and l_j > -inf),
+    //   r_j <= 0 if (l_j = -inf and u_j < +inf),
+    //   r_j  = 0 if both bounds are finite, free if both are infinite.
     auto primal_ray = s_.delta_x;
-
-    // where var_lb is finite: max(primal_ray, 0)
-    auto var_lb_finite_01 = 1.0 - s_.var_lb_inf_mask;
-    primal_ray = mx::where(var_lb_finite_01, mx::maximum(primal_ray, mx::zeros_like(primal_ray)),
-                           primal_ray);
-    // where var_ub is finite: min(primal_ray, 0)
-    auto var_ub_finite_01 = 1.0 - s_.var_ub_inf_mask;
-    primal_ray = mx::where(var_ub_finite_01, mx::minimum(primal_ray, mx::zeros_like(primal_ray)),
-                           primal_ray);
-    mx::eval(primal_ray);
-
-    // Normalize to unit inf-norm
     double p_ray_inf_norm = mlx_norm_inf(primal_ray);
-    if (p_ray_inf_norm > 1e-14) {
+    if (p_ray_inf_norm > 0.0) {
         primal_ray = primal_ray / mlx_scalar_like(p_ray_inf_norm, primal_ray);
         mx::eval(primal_ray);
     }
-
-    // A * primal_ray
     auto A_pr = mat_Ax(primal_ray);
+    working_primal_ray_objective_ = mlx_dot(s_.obj, primal_ray);
+    s_.primal_ray_linear_objective =
+        working_primal_ray_objective_ / (s_.con_bound_rescale * s_.obj_vec_rescale);
 
-    // Max primal ray infeasibility
-    auto pr_infeas =
-        mx::maximum(mx::maximum(-A_pr - s_.con_ub, A_pr + s_.con_lb), mx::zeros_like(A_pr));
-    s_.max_primal_ray_infeasibility = mlx_norm_inf(pr_infeas);
+    auto var_upper_only = s_.var_ub_inf_mask * (1.0 - s_.var_lb_inf_mask);
+    auto var_lower_only = s_.var_lb_inf_mask * (1.0 - s_.var_ub_inf_mask);
+    auto var_both_finite = (1.0 - s_.var_lb_inf_mask) * (1.0 - s_.var_ub_inf_mask);
+    auto r_var_viol =
+        mx::maximum(-primal_ray, mx::zeros_like(primal_ray)) * var_upper_only +
+        mx::maximum(primal_ray, mx::zeros_like(primal_ray)) * var_lower_only +
+        mx::abs(primal_ray) * var_both_finite;
+    auto con_upper_only = s_.con_ub_inf_mask * (1.0 - s_.con_lb_inf_mask);
+    auto con_lower_only = s_.con_lb_inf_mask * (1.0 - s_.con_ub_inf_mask);
+    auto con_both_finite = (1.0 - s_.con_lb_inf_mask) * (1.0 - s_.con_ub_inf_mask);
+    auto r_con_viol =
+        mx::maximum(-A_pr, mx::zeros_like(A_pr)) * con_upper_only +
+        mx::maximum(A_pr, mx::zeros_like(A_pr)) * con_lower_only +
+        mx::abs(A_pr) * con_both_finite;
+    s_.max_primal_ray_infeasibility =
+        std::max(mlx_norm_inf(r_var_viol), mlx_norm_inf(r_con_viol));
 
-    // Primal ray linear objective
-    s_.primal_ray_linear_objective = mlx_dot(s_.obj, primal_ray);
-
-    // Dual ray
+    // Dual ray y (primal-infeasibility certificate): the separation gap
+    //   min_s y^T s - max_x (A^T y)^T x
+    // over the constraint box s and variable box x must be strictly positive.
+    // Finiteness of min_s requires y_i > 0 only where con_lb_i is finite and
+    // y_i < 0 only where con_ub_i is finite; finiteness of max_x requires
+    // (A^T y)_j > 0 only where var_ub_j is finite and < 0 only where
+    // var_lb_j is finite. Feasible problems satisfy the gap <= 0 for every y
+    // by weak duality, so this test cannot fire on them in exact arithmetic.
     auto dual_ray = s_.delta_y;
-
-    auto con_lb_finite_01 = 1.0 - s_.con_lb_inf_mask;
-    dual_ray =
-        mx::where(con_lb_finite_01, mx::maximum(dual_ray, mx::zeros_like(dual_ray)), dual_ray);
-    auto con_ub_finite_01 = 1.0 - s_.con_ub_inf_mask;
-    dual_ray =
-        mx::where(con_ub_finite_01, mx::minimum(dual_ray, mx::zeros_like(dual_ray)), dual_ray);
-    mx::eval(dual_ray);
-
     double d_ray_inf_norm = mlx_norm_inf(dual_ray);
-    if (d_ray_inf_norm > 1e-14) {
+    if (d_ray_inf_norm > 0.0) {
         dual_ray = dual_ray / mlx_scalar_like(d_ray_inf_norm, dual_ray);
         mx::eval(dual_ray);
     }
-
-    // A^T * dual_ray
     auto AT_dr = mat_ATx(dual_ray);
 
-    auto dr_infeas =
-        mx::maximum(mx::maximum(-AT_dr - s_.var_ub, AT_dr + s_.var_lb), mx::zeros_like(AT_dr));
-    s_.max_dual_ray_infeasibility = mlx_norm_inf(dr_infeas);
+    auto y_con_viol = mx::maximum(dual_ray, mx::zeros_like(dual_ray)) * s_.con_lb_inf_mask +
+                      mx::maximum(-dual_ray, mx::zeros_like(dual_ray)) * s_.con_ub_inf_mask;
+    auto y_var_viol = mx::maximum(AT_dr, mx::zeros_like(AT_dr)) * s_.var_ub_inf_mask +
+                      mx::maximum(-AT_dr, mx::zeros_like(AT_dr)) * s_.var_lb_inf_mask;
+    s_.max_dual_ray_infeasibility =
+        std::max(mlx_norm_inf(y_con_viol), mlx_norm_inf(y_var_viol));
 
-    // Dual ray objective: dual_ray^T * b  (inf→0 safe)
-    auto con_lb_safe2 = mx::where(mx::isfinite(s_.con_lb), s_.con_lb, mx::zeros_like(s_.con_lb));
-    auto con_ub_safe2 = mx::where(mx::isfinite(s_.con_ub), s_.con_ub, mx::zeros_like(s_.con_ub));
-    auto b_contrib = mx::where(dual_ray > 0.0, con_lb_safe2 * dual_ray, con_ub_safe2 * dual_ray);
-    s_.dual_ray_objective = mlx_sum(b_contrib);
+    // Finite-safe bound values must be derived from the CURRENT scaled bounds:
+    // the cached finite-safe arrays are only refreshed after Ruiz and go stale
+    // after Pock-Chambolle and bound/objective scaling.
+    auto con_lb_safe = mx::where(mx::isfinite(s_.con_lb), s_.con_lb, mx::zeros_like(s_.con_lb));
+    auto con_ub_safe = mx::where(mx::isfinite(s_.con_ub), s_.con_ub, mx::zeros_like(s_.con_ub));
+    auto var_lb_safe = mx::where(mx::isfinite(s_.var_lb), s_.var_lb, mx::zeros_like(s_.var_lb));
+    auto var_ub_safe = mx::where(mx::isfinite(s_.var_ub), s_.var_ub, mx::zeros_like(s_.var_ub));
+    auto min_s = mx::maximum(dual_ray, mx::zeros_like(dual_ray)) * con_lb_safe +
+                 mx::minimum(dual_ray, mx::zeros_like(dual_ray)) * con_ub_safe;
+    auto max_x = mx::maximum(AT_dr, mx::zeros_like(AT_dr)) * var_ub_safe +
+                 mx::minimum(AT_dr, mx::zeros_like(AT_dr)) * var_lb_safe;
+    working_dual_ray_objective_ = mlx_sum(min_s) - mlx_sum(max_x);
+    s_.dual_ray_objective =
+        working_dual_ray_objective_ / (s_.con_bound_rescale * s_.obj_vec_rescale);
 }
 
 // ---------------------------------------------------------------------------
@@ -2692,10 +3132,42 @@ bool MlxPdlpSolver::mlx_check_termination() {
     double feas_tol = tc.eps_feasible_relative;
     double opt_tol = tc.eps_optimal_relative;
 
-    // CUDA reference: check optimality first
+    // Check optimality first. The gap is compared in absolute value: a
+    // numerically negative gap (primal below dual) is noise, not a proof of
+    // optimality, and must not pass a one-sided comparison.
     if (s_.relative_dual_residual < feas_tol && s_.relative_primal_residual < feas_tol &&
-        s_.relative_objective_gap < opt_tol) {
+        std::fabs(s_.relative_objective_gap) < opt_tol) {
         s_.termination_reason = TERMINATION_REASON_OPTIMAL;
+        return true;
+    }
+
+    // ---- Infeasibility certification ----
+    // Farkas separation certificates (see mlx_compute_infeasibility_information).
+    // A dual ray with a strictly positive separation gap certifies primal
+    // infeasibility; a primal ray with a negative linear objective certifies
+    // dual infeasibility (an unbounded primal). The gap must be significant
+    // relative to the problem data, and the recession-cone residual small
+    // relative to the gap. On feasible problems the dual-ray gap is <= 0 for
+    // every y by weak duality, so only fp noise could trip it, and the
+    // significance floor absorbs that noise. FP32 ray arithmetic floors the
+    // attainable residual ratio near 1e-3, so the Metal path uses that relaxed
+    // threshold while the FP64 CPU path keeps the requested feasibility
+    // tolerance.
+    const double infeas_tol =
+        s_.cpu_double_precision_active ? feas_tol : std::max(feas_tol, 1e-3);
+    mlx_compute_infeasibility_information();
+    // Significance floors use the original-unit gaps; the residual ratio tests
+    // use the working-unit gaps so both sides of each comparison share units.
+    if (s_.dual_ray_objective > infeas_tol * (1.0 + s_.constraint_bound_norm) &&
+        s_.max_dual_ray_infeasibility <= infeas_tol * working_dual_ray_objective_) {
+        s_.termination_reason = TERMINATION_REASON_PRIMAL_INFEASIBLE;
+        return true;
+    }
+    if (s_.primal_ray_linear_objective <
+            -infeas_tol * (1.0 + s_.objective_vector_norm) &&
+        s_.max_primal_ray_infeasibility <=
+            -infeas_tol * working_primal_ray_objective_) {
+        s_.termination_reason = TERMINATION_REASON_DUAL_INFEASIBLE;
         return true;
     }
 
@@ -3123,7 +3595,7 @@ double MlxPdlpSolver::recompute_original_certificate(mlxpdlp_result_t *result) {
         result->relative_primal_residual < criteria.eps_feasible_relative &&
         relative_variable_bound_violation < criteria.eps_feasible_relative &&
         result->relative_dual_residual < criteria.eps_feasible_relative &&
-        result->relative_objective_gap < criteria.eps_optimal_relative;
+        std::fabs(result->relative_objective_gap) < criteria.eps_optimal_relative;
     if (certificate_is_optimal) {
         result->termination_reason = TERMINATION_REASON_OPTIMAL;
     } else if ((!std::isfinite(relative_variable_bound_violation) ||
@@ -3624,11 +4096,15 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
 
     int eval_freq = params_.termination_evaluation_frequency;
     bool do_restart = false;
+    // On the fused sparse-Metal path, minor iterations accumulate in the lazy
+    // graph and are materialized every fused_batch iterations; major
+    // iterations always evaluate so restart/residual checks see live data.
+    const int fused_batch = fused_eval_batch_size();
 
     while (s_.total_count < params_.termination_criteria.iteration_limit) {
         // --- First iteration (major) ---
         mlx_compute_next_primal(1, true);
-        mlx_compute_next_dual(1, true);
+        mlx_compute_next_dual(1, true, true);
 
         // After first iteration, check if we need a restart
         if (do_restart) {
@@ -3640,12 +4116,12 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
         // --- Minor iterations 2 through eval_freq-1 ---
         for (int i = 2; i <= eval_freq - 1; ++i) {
             mlx_compute_next_primal(i, false);
-            mlx_compute_next_dual(i, false);
+            mlx_compute_next_dual(i, false, i % fused_batch == 0);
         }
 
         // --- Last iteration (major) ---
         mlx_compute_next_primal(eval_freq, true);
-        mlx_compute_next_dual(eval_freq, true);
+        mlx_compute_next_dual(eval_freq, true, true);
 
         // --- Periodic checks ---
         mlx_compute_fixed_point_error();

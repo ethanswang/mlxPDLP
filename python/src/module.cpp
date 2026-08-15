@@ -192,6 +192,7 @@ static void bind_parameters(nb::module_ &m) {
         .def_rw("presolve_primal_propagation",
                 &pdhg_parameters_t::presolve_primal_propagation)
         .def_rw("matrix_zero_tol", &pdhg_parameters_t::matrix_zero_tol)
+        .def_rw("metal_fused_kernels", &pdhg_parameters_t::metal_fused_kernels)
         .def_prop_rw(
             "tolerance",
             [](pdhg_parameters_t &p) {

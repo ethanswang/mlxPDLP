@@ -113,6 +113,11 @@ typedef struct {
     bool presolve_finite_bound_tightening;
     bool presolve_primal_propagation;
     double matrix_zero_tol;
+    // Fuse each PDHG half-step (SpMV + scaled projection + reflection +
+    // Halpern weighting) into a single Metal kernel on the sparse Metal path.
+    // Disable to fall back to the unfused MLX-expression formulation for A/B
+    // comparison or diagnostics. Only affects the sparse Metal backend.
+    bool metal_fused_kernels;
 } pdhg_parameters_t;
 
 typedef struct {
@@ -474,6 +479,12 @@ class MlxPdlpSolver {
     mx::array host_double_handoff_y_ = _mlx_empty_array();
     mx::array host_double_handoff_dual_slack_ = _mlx_empty_array();
 
+    // Infeasibility-ray gaps in working (scaled) units. The ratio tests in
+    // mlx_check_termination compare residuals and gaps in these consistent
+    // units; the public state fields carry the original-unit values.
+    double working_dual_ray_objective_ = 0.0;
+    double working_primal_ray_objective_ = 0.0;
+
     // ---- Core linear algebra ----
     mx::array mat_Ax(const mx::array &x);  // A * x
     mx::array mat_ATx(const mx::array &y); // A^T * y
@@ -491,6 +502,11 @@ class MlxPdlpSolver {
     void prepare_sparse_metal_backend();
     void prepare_sparse_cpu_backend();
     mx::array sparse_cpu_matvec(const mx::array &x, bool transpose, int rows);
+
+    // Fused sparse-Metal PDHG half-steps. `scalars` is a float32 array of
+    // {step, reflection_coefficient, halpern_weight, major_flag}.
+    std::vector<mx::array> fused_primal_step(const mx::array &scalars);
+    std::vector<mx::array> fused_dual_step(const mx::array &scalars);
 
     // ---- Scalar reductions ----
     double mlx_dot(const mx::array &a, const mx::array &b);
@@ -517,7 +533,13 @@ class MlxPdlpSolver {
 
     // ---- PDHG iteration sub-steps ----
     void mlx_compute_next_primal(int k_offset, bool is_major);
-    void mlx_compute_next_dual(int k_offset, bool is_major);
+    // eval_now controls the fused sparse-Metal path: when false, the half-step
+    // kernels are only appended to the lazy graph and are materialized by a
+    // later eval, batching consecutive iterations into one evaluation.
+    void mlx_compute_next_dual(int k_offset, bool is_major, bool eval_now = true);
+    // Number of fused iterations to accumulate between evaluations. Keeps the
+    // batch graph within a bounded memory footprint.
+    int fused_eval_batch_size() const;
     void mlx_compute_fixed_point_error();
     void mlx_compute_residual();
     void mlx_save_best_iterate();

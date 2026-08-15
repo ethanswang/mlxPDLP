@@ -45,7 +45,9 @@ line number so it remains useful as the source evolves.
 | PSLP presolve and postsolve | Implemented and optional at build time |
 | Guarded primal/dual and host-FP64 feasibility polishing | Implemented |
 | Primal and dual warm starts | Implemented when presolve is disabled |
-| Active infeasibility-certificate termination | Not implemented |
+| Active infeasibility-certificate termination | Implemented (Farkas separation ray tests) |
+| Fused single-kernel Metal PDHG half-steps | Implemented and enabled by default |
+| Batched lazy evaluation of fused iterations | Implemented with a memory-bounded batch |
 
 The C++ solver API lives in the `mlxpdlp` namespace. The C-compatible MPS
 loader uses globally visible `mlxpdlp_`-prefixed names.
@@ -366,11 +368,36 @@ matrix-vector products preserve their additive semantics.
 
 ### Matrix-vector products
 
-The adaptive sparse Metal kernel packs short rows across a 256-thread group
-and assigns an entire group with a reduction tree to each long row. Both
-matrix directions use the same kernel and differ only in their CSR arrays.
-The sparse CPU path wraps Accelerate's double-precision CSR matrix-vector
-product in an MLX primitive.
+Three dispatch strategies are selected per matrix direction from the CSR row
+profile:
+
+- `scalar_rows`: one thread per row with a serial FMA loop (rows up to 16
+  nonzeros);
+- `simdgroup_rows`: one 32-lane SIMD group per row with a strided loop and
+  `simd_sum` (uniform medium rows);
+- `adaptive`: short rows (up to 64 nonzeros) packed 256 per threadgroup, long
+  rows reduced cooperatively by a whole 256-thread group through shared
+  memory.
+
+The SIMD-group crossover threshold is device-tuned (the 8M-nonzero default was
+measured on an M3 Max; wider or narrower GPU families shift it) and can be
+overridden with `MLXPDLP_SPMV_SIMD_NNZ_THRESHOLD`. All accumulation loops use
+explicit `fma`. The sparse CPU path wraps Accelerate's double-precision CSR
+matrix-vector product in an MLX primitive.
+
+### Fused iteration kernels
+
+On the sparse Metal path, each PDHG half-step runs as one fused kernel: CSR
+SpMV, scaled gradient step, bound projection, reflection, Halpern weighting,
+and (on major iterations) the `x_pdhg`/`y_pdhg`/`dual_slack` snapshots in a
+single dispatch. Six kernels exist (three dispatch strategies per direction);
+the update bodies replicate the MLX expression sequences so the fused path is
+numerically comparable to the unfused one. Minor iterations accumulate in the
+lazy graph and are evaluated every `fused_eval_batch_size()` iterations (a
+memory-bounded batch, at most 16), so one `mx::eval` materializes many
+iterations instead of four per iteration. `metal_fused_kernels = false`
+restores the unfused MLX-expression formulation for A/B comparison. This
+design matches the fused bucket kernels of HPR-LP-C.
 
 The fallback uses MLX `matmul`, reshaping vectors to two-dimensional operands:
 
@@ -426,6 +453,7 @@ scaled problem.
 | `verbose` | `true` |
 | `termination_evaluation_frequency` | `200` |
 | `reflection_coefficient` | `1.0` |
+| `metal_fused_kernels` | `true` |
 | `sv_max_iter` | `5000` |
 | `sv_tol` | `1e-4` |
 | `eps_optimal_relative` | `1e-4` |
@@ -764,28 +792,49 @@ Restart then:
 
 ## Termination
 
-`mlx_check_termination()` currently checks, in order:
+`mlx_check_termination()` checks, in order:
 
-1. L2 optimality;
-2. iteration limit;
-3. time limit.
+1. L2 optimality (gap compared in absolute value);
+2. infeasibility certification (Farkas separation ray tests);
+3. the host-FP64 handoff gates when enabled;
+4. iteration limit;
+5. time limit.
 
 Optimality requires:
 
 ```text
 relative_primal_residual < eps_feasible_relative
 relative_dual_residual   < eps_feasible_relative
-relative_objective_gap   < eps_optimal_relative
+abs(relative_objective_gap) < eps_optimal_relative
 ```
 
-Timing uses `clock()` and is stored in `cumulative_time_sec`.
+### Infeasibility certification
 
-Although the state and parameter structs contain L∞ optimality,
-infeasibility-ray, and feasibility-polishing fields, those paths are not
-connected to current PDHG termination. Presolve can terminate before PDHG
-when PSLP proves infeasibility or removes the whole problem. In particular,
-`mlx_compute_infeasibility_information()` is implemented but is not called by
-`solve()` or `mlx_check_termination()`.
+`mlx_compute_infeasibility_information()` builds Farkas separation
+certificates from the sign-constrained fixed-point deltas, normalized to
+unit inf-norm:
+
+- A **primal ray** r (dual-infeasibility certificate) must lie in the
+  recession cone of the variable box with A r in the recession cone of the
+  constraint box, and needs cᵀr < 0. Violations of the recession-cone sign
+  conditions form `max_primal_ray_infeasibility`.
+- A **dual ray** y (primal-infeasibility certificate) needs the separation
+  gap min_s yᵀs − max_x (Aᵀy)ᵀx > 0 over the constraint box s and variable
+  box x, with finiteness sign violations forming
+  `max_dual_ray_infeasibility`. Feasible problems satisfy the gap ≤ 0 for
+  every y by weak duality, so this test cannot fire on them in exact
+  arithmetic.
+
+Termination fires when the certificate gap is significant relative to the
+original problem data and the recession-cone residual is small relative to
+the gap, with residual ratios compared in consistent working units. The
+FP64 CPU path uses `eps_feasible_relative` for the ratio; the FP32 Metal
+path uses at least 1e-3 because FP32 ray arithmetic floors the attainable
+ratio. Both reference implementations are more conservative: cuPDLPx
+computes ray metrics but never calls its criteria, and HPR-LP-C relies
+entirely on PSLP presolve for infeasibility proofs.
+
+Timing uses `clock()` and is stored in `cumulative_time_sec`.
 
 ## Result extraction and ownership
 
@@ -918,22 +967,20 @@ back to the original cuPDLPx checkout.
 ## Current limitations and next engineering priorities
 
 1. **Metal is single precision internally.** This limits attainable accuracy
-   on poorly scaled LPs; CPU FP64 is the reliability fallback.
-2. **Frequent synchronization.** Primal/dual steps and scalar reductions
-   still evaluate eagerly, increasing GPU dispatch and synchronization
-   overhead.
-3. **Warm-start/presolve exclusivity.** PSLP 0.0.8 does not expose an initial
+   on poorly scaled LPs; CPU FP64 is the reliability fallback. FP32 ray
+   arithmetic also limits infeasibility certification to cleaner rays on
+   Metal (the FP64 CPU path certifies the pathological cases).
+2. **Warm-start/presolve exclusivity.** PSLP 0.0.8 does not expose an initial
    iterate mapping, so callers must choose one feature per solve.
-4. **Limited termination modes.** PDHG termination only checks L2 optimality,
-   the iteration limit, and the time limit.
-5. **Dormant infeasibility helper.** Ray metrics are implemented but not
-   connected to termination or result validation.
-6. **Signed relative gap.** A negative gap satisfies the current one-sided
-   optimality comparison; using an absolute or otherwise safeguarded gap is a
-   potential follow-up.
-7. **Core minimization semantics.** Maximize sense is normalized by callers,
-    including the MPS comparison.
+3. **Fused kernels cover the sparse Metal path only.** Dense-fallback and
+   CPU problems still use the unfused MLX-expression formulation.
+4. **Infeasibility certification uses L2-norm reduction reads.** The ray
+   checks perform two extra SpMVs and several host-synchronizing reductions
+   per evaluation block.
+5. **Core minimization semantics.** Maximize sense is normalized by callers,
+   including the MPS comparison.
 
-The next performance priorities are fewer per-iteration `mx::eval()`
-boundaries, further adaptive Metal kernel tuning, and moving sparse
-preprocessing to Metal if host setup becomes material.
+The next performance priorities are moving sparse preprocessing to Metal if
+host setup becomes material, and widening the fused kernels to cover the
+residual and fixed-point SpMVs so block-level reductions run as single
+dispatches.

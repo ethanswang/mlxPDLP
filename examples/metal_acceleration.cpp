@@ -101,10 +101,11 @@ GeneratedProblem make_problem(int size) {
     return problem;
 }
 
-pdhg_parameters_t fixed_work_parameters(int iterations) {
+pdhg_parameters_t fixed_work_parameters(int iterations, bool metal_fused) {
     pdhg_parameters_t params;
     mlxpdlp_set_default_parameters(&params);
     params.verbose = false;
+    params.metal_fused_kernels = metal_fused;
     params.presolve = false;
     params.feasibility_polishing = false;
     params.host_double_polishing = false;
@@ -124,8 +125,8 @@ pdhg_parameters_t fixed_work_parameters(int iterations) {
 }
 
 SolveSummary run_fixed_work(const GeneratedProblem &problem, int iterations,
-                            const mx::Device &device) {
-    pdhg_parameters_t params = fixed_work_parameters(iterations);
+                            const mx::Device &device, bool metal_fused) {
+    pdhg_parameters_t params = fixed_work_parameters(iterations, metal_fused);
 
     const auto setup_start = std::chrono::steady_clock::now();
     MlxPdlpSolver solver(problem.size, problem.size, problem.row_ptr.data(), problem.col_ind.data(),
@@ -173,14 +174,27 @@ void print_summary(const char *label, const SolveSummary &summary) {
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc > 3) {
-        std::fprintf(stderr, "Usage: %s [SIZE=163840] [ITERATIONS=1000]\n", argv[0]);
+    if (argc > 4) {
+        std::fprintf(stderr,
+                     "Usage: %s [SIZE=163840] [ITERATIONS=1000] [fused|unfused]\n",
+                     argv[0]);
         return 2;
     }
 
     try {
         const int size = argc > 1 ? parse_positive_integer(argv[1], "size") : 163840;
         const int iterations = argc > 2 ? parse_positive_integer(argv[2], "iterations") : 1000;
+        bool metal_fused = true;
+        if (argc > 3) {
+            std::string mode = argv[3];
+            if (mode == "fused") {
+                metal_fused = true;
+            } else if (mode == "unfused") {
+                metal_fused = false;
+            } else {
+                throw std::invalid_argument("third argument must be 'fused' or 'unfused'");
+            }
+        }
         if (size < 4096) {
             throw std::invalid_argument(
                 "size must be at least 4096 to exercise both sparse backends");
@@ -200,13 +214,15 @@ int main(int argc, char **argv) {
                     problem.values.size());
         std::printf("Timing protocol: %d fixed PDHG iterations per device (not convergence)\n",
                     iterations);
+        std::printf("Metal iteration kernels: %s\n", metal_fused ? "fused" : "unfused");
         std::printf("Warming CPU and Metal kernels (not timed)...\n");
 
-        (void)run_fixed_work(problem, kWarmupIterations, mx::Device::cpu);
-        (void)run_fixed_work(problem, kWarmupIterations, mx::Device::gpu);
+        (void)run_fixed_work(problem, kWarmupIterations, mx::Device::cpu, true);
+        (void)run_fixed_work(problem, kWarmupIterations, mx::Device::gpu, metal_fused);
 
-        const SolveSummary cpu = run_fixed_work(problem, iterations, mx::Device::cpu);
-        const SolveSummary metal = run_fixed_work(problem, iterations, mx::Device::gpu);
+        const SolveSummary cpu = run_fixed_work(problem, iterations, mx::Device::cpu, true);
+        const SolveSummary metal = run_fixed_work(problem, iterations, mx::Device::gpu,
+                                                  metal_fused);
         print_summary("MLX/CPU", cpu);
         print_summary("MLX/Metal", metal);
 

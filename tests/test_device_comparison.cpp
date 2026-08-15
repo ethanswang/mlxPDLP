@@ -335,6 +335,317 @@ bool sparse_simdgroup_rows_match() {
     return valid;
 }
 
+bool sparse_fused_unfused_match() {
+    // The fused and unfused Metal iteration paths must produce equivalent
+    // trajectories. With the default reflection coefficient both paths execute
+    // identical fp32 arithmetic, so a tight elementwise tolerance is possible.
+    // The problem mixes a 2048-entry A^T row with short rows so both the
+    // adaptive and scalar-row fused kernels run in the same solve.
+    constexpr int size = 2048;
+    std::vector<int> row_ptr(static_cast<size_t>(size) + 1);
+    std::vector<int> col_ind;
+    std::vector<double> values;
+    col_ind.reserve(2 * size - 1);
+    values.reserve(2 * size - 1);
+    for (int row = 0; row < size; ++row) {
+        row_ptr[static_cast<size_t>(row)] = static_cast<int>(col_ind.size());
+        col_ind.push_back(0);
+        values.push_back(1.0);
+        if (row > 0) {
+            col_ind.push_back(row);
+            values.push_back(1.0);
+        }
+    }
+    row_ptr.back() = static_cast<int>(col_ind.size());
+
+    std::vector<double> objective(static_cast<size_t>(size), 1.0);
+    objective[0] = size;
+    std::vector<double> constraint_bound(static_cast<size_t>(size), 2.0);
+    constraint_bound[0] = 1.0;
+    std::vector<double> variable_lb(static_cast<size_t>(size), -INFINITY);
+    std::vector<double> variable_ub(static_cast<size_t>(size), INFINITY);
+    std::vector<double> primal_start(static_cast<size_t>(size), 1.0);
+    std::vector<double> dual_start(static_cast<size_t>(size), 1.0);
+
+    auto solve_once = [&](bool fused) {
+        pdhg_parameters_t params;
+        mlxpdlp_set_default_parameters(&params);
+        params.verbose = false;
+        params.metal_fused_kernels = fused;
+        params.presolve = false;
+        params.curtis_reid_iterations = 0;
+        params.l_inf_ruiz_iterations = 0;
+        params.has_pock_chambolle_alpha = false;
+        params.bound_objective_rescaling = false;
+        params.feasibility_polishing = false;
+        params.host_double_polishing = false;
+        params.sv_max_iter = 20;
+        params.termination_evaluation_frequency = 10;
+        params.termination_criteria.eps_optimal_relative = 0.0;
+        params.termination_criteria.eps_feasible_relative = 0.0;
+        params.termination_criteria.iteration_limit = 40;
+        params.termination_criteria.time_sec_limit = 10.0;
+
+        MlxPdlpSolver solver(size, size, row_ptr.data(), col_ind.data(), values.data(),
+                             variable_lb.data(), variable_ub.data(),
+                             constraint_bound.data(), constraint_bound.data(),
+                             objective.data(), 0.0, &params, primal_start.data(),
+                             dual_start.data(), mx::Device::gpu);
+        return solver.solve();
+    };
+
+    mlxpdlp_result_t *fused = solve_once(true);
+    mlxpdlp_result_t *unfused = solve_once(false);
+    mx::synchronize();
+
+    bool valid = fused && unfused;
+    if (valid) {
+        for (int i = 0; i < size && valid; ++i) {
+            valid = std::fabs(fused->primal_solution[i] - unfused->primal_solution[i]) <=
+                        1e-6 * (1.0 + std::fabs(unfused->primal_solution[i])) &&
+                    std::fabs(fused->dual_solution[i] - unfused->dual_solution[i]) <=
+                        1e-6 * (1.0 + std::fabs(unfused->dual_solution[i]));
+        }
+        valid = valid && fused->total_count == unfused->total_count &&
+                std::fabs(fused->primal_objective_value -
+                          unfused->primal_objective_value) <= 1e-6;
+    }
+    std::printf("MLX/GPU  fused/unfused iteration agreement %s\n",
+                valid ? "PASS" : "FAIL");
+    destroy_result(fused);
+    destroy_result(unfused);
+    return valid;
+}
+
+bool sparse_fused_unfused_simdgroup_match() {
+    // Same agreement check as sparse_fused_unfused_match, but on a uniform
+    // 65-entry-row matrix so BOTH matrix directions dispatch to the
+    // simdgroup_rows fused kernel (the other agreement test covers the
+    // scalar-row and adaptive variants).
+    constexpr int size = 512;
+    constexpr int entries_per_row = 65;
+    constexpr double diagonal_value = 2.0;
+    constexpr double off_diagonal_value = 0.01;
+    const double row_sum =
+        diagonal_value + (entries_per_row - 1) * off_diagonal_value;
+
+    std::vector<int> row_ptr(static_cast<size_t>(size) + 1);
+    std::vector<int> col_ind;
+    std::vector<double> values;
+    col_ind.reserve(static_cast<size_t>(size) * entries_per_row);
+    values.reserve(static_cast<size_t>(size) * entries_per_row);
+    for (int row = 0; row < size; ++row) {
+        row_ptr[static_cast<size_t>(row)] = static_cast<int>(col_ind.size());
+        for (int entry = 0; entry < entries_per_row; ++entry) {
+            col_ind.push_back((row + entry) % size);
+            values.push_back(entry == 0 ? diagonal_value : off_diagonal_value);
+        }
+    }
+    row_ptr.back() = static_cast<int>(col_ind.size());
+
+    std::vector<double> objective(static_cast<size_t>(size), 0.0);
+    std::vector<double> constraint_bound(static_cast<size_t>(size), row_sum);
+    std::vector<double> variable_lb(static_cast<size_t>(size), -INFINITY);
+    std::vector<double> variable_ub(static_cast<size_t>(size), INFINITY);
+    std::vector<double> primal_start(static_cast<size_t>(size), 1.0);
+    std::vector<double> dual_start(static_cast<size_t>(size), 0.0);
+
+    auto solve_once = [&](bool fused) {
+        pdhg_parameters_t params;
+        mlxpdlp_set_default_parameters(&params);
+        params.verbose = false;
+        params.metal_fused_kernels = fused;
+        params.presolve = false;
+        params.curtis_reid_iterations = 0;
+        params.l_inf_ruiz_iterations = 0;
+        params.has_pock_chambolle_alpha = false;
+        params.bound_objective_rescaling = false;
+        params.feasibility_polishing = false;
+        params.host_double_polishing = false;
+        params.sv_max_iter = 20;
+        params.termination_evaluation_frequency = 10;
+        params.termination_criteria.eps_optimal_relative = 0.0;
+        params.termination_criteria.eps_feasible_relative = 0.0;
+        params.termination_criteria.iteration_limit = 40;
+        params.termination_criteria.time_sec_limit = 10.0;
+
+        MlxPdlpSolver solver(size, size, row_ptr.data(), col_ind.data(), values.data(),
+                             variable_lb.data(), variable_ub.data(),
+                             constraint_bound.data(), constraint_bound.data(),
+                             objective.data(), 0.0, &params, primal_start.data(),
+                             dual_start.data(), mx::Device::gpu);
+        mlxpdlp_result_t *result = solver.solve();
+        // The dispatch strategies are selected during prepare_sparse_metal_backend
+        // inside solve(); inspect them only after the solve.
+        if (solver.state().sparse_a_spmv_strategy !=
+                SparseMetalSpmvStrategy::simdgroup_rows ||
+            solver.state().sparse_at_spmv_strategy !=
+                SparseMetalSpmvStrategy::simdgroup_rows) {
+            destroy_result(result);
+            throw std::runtime_error("fixture did not select the simdgroup-row strategy");
+        }
+        return result;
+    };
+
+    mlxpdlp_result_t *fused = solve_once(true);
+    mlxpdlp_result_t *unfused = solve_once(false);
+    mx::synchronize();
+
+    bool valid = fused && unfused;
+    if (valid) {
+        for (int i = 0; i < size && valid; ++i) {
+            valid = std::fabs(fused->primal_solution[i] - unfused->primal_solution[i]) <=
+                        1e-6 * (1.0 + std::fabs(unfused->primal_solution[i])) &&
+                    std::fabs(fused->dual_solution[i] - unfused->dual_solution[i]) <=
+                        1e-6 * (1.0 + std::fabs(unfused->dual_solution[i]));
+        }
+        valid = valid && fused->total_count == unfused->total_count;
+    }
+    std::printf("MLX/GPU  fused/unfused SIMD-group iteration agreement %s\n",
+                valid ? "PASS" : "FAIL");
+    destroy_result(fused);
+    destroy_result(unfused);
+    return valid;
+}
+
+bool spmv_simdgroup_threshold_override() {
+    // A uniform 32-entry-row matrix lies below the default SIMD-group
+    // aggregate-work cutoff (adaptive path), but above a small explicit
+    // MLXPDLP_SPMV_SIMD_NNZ_THRESHOLD override (SIMD-group path). The override
+    // must actually change the selected dispatch strategy.
+    constexpr int size = 512;
+    constexpr int entries_per_row = 32;
+    std::vector<int> row_ptr(static_cast<size_t>(size) + 1);
+    std::vector<int> col_ind;
+    std::vector<double> values;
+    col_ind.reserve(static_cast<size_t>(size) * entries_per_row);
+    values.reserve(static_cast<size_t>(size) * entries_per_row);
+    for (int row = 0; row < size; ++row) {
+        row_ptr[static_cast<size_t>(row)] = static_cast<int>(col_ind.size());
+        for (int entry = 0; entry < entries_per_row; ++entry) {
+            col_ind.push_back((row + entry) % size);
+            values.push_back(entry == 0 ? 2.0 : 0.01);
+        }
+    }
+    row_ptr.back() = static_cast<int>(col_ind.size());
+
+    std::vector<double> objective(static_cast<size_t>(size), 0.0);
+    std::vector<double> constraint_bound(static_cast<size_t>(size), 2.0 + 31 * 0.01);
+    std::vector<double> variable_lb(static_cast<size_t>(size), -INFINITY);
+    std::vector<double> variable_ub(static_cast<size_t>(size), INFINITY);
+
+    auto solve_with_strategy = [&]() {
+        pdhg_parameters_t params;
+        mlxpdlp_set_default_parameters(&params);
+        params.verbose = false;
+        params.presolve = false;
+        params.termination_evaluation_frequency = 2;
+        params.termination_criteria.iteration_limit = 2;
+        params.termination_criteria.time_sec_limit = 10.0;
+        MlxPdlpSolver solver(size, size, row_ptr.data(), col_ind.data(), values.data(),
+                             variable_lb.data(), variable_ub.data(),
+                             constraint_bound.data(), constraint_bound.data(),
+                             objective.data(), 0.0, &params, mx::Device::gpu);
+        mlxpdlp_result_t *result = solver.solve();
+        const auto strategy = solver.state().sparse_a_spmv_strategy;
+        destroy_result(result);
+        return strategy;
+    };
+
+    const bool has_gpu = mx::is_available(mx::Device::gpu);
+    if (!has_gpu) {
+        return true;
+    }
+
+    const SparseMetalSpmvStrategy default_strategy = solve_with_strategy();
+    if (default_strategy != SparseMetalSpmvStrategy::adaptive &&
+        default_strategy != SparseMetalSpmvStrategy::simdgroup_rows) {
+        std::printf("MLX/GPU  SpMV SIMD-group threshold override SKIP (default=%d)\n",
+                    static_cast<int>(default_strategy));
+        return true;
+    }
+
+    setenv("MLXPDLP_SPMV_SIMD_NNZ_THRESHOLD", "1000", 1);
+    const SparseMetalSpmvStrategy overridden_strategy = solve_with_strategy();
+    unsetenv("MLXPDLP_SPMV_SIMD_NNZ_THRESHOLD");
+
+    const bool valid =
+        default_strategy != overridden_strategy &&
+        overridden_strategy == SparseMetalSpmvStrategy::simdgroup_rows;
+    std::printf("MLX/GPU  SpMV SIMD-group threshold override %s\n",
+                valid ? "PASS" : "FAIL");
+    return valid;
+}
+
+bool infeasibility_certificates_match() {
+    // Two synthetic certificates exercise the wired Farkas termination:
+    //  - a provably primal-infeasible LP (x = 3 and x = 2 simultaneously),
+    //  - a provably unbounded LP (min -x subject to x >= 0).
+    // FP64 certifies both cleanly; FP32 ray arithmetic only reliably
+    // certifies the unbounded case (see docs/architecture.md).
+    auto make_params = []() {
+        pdhg_parameters_t params;
+        mlxpdlp_set_default_parameters(&params);
+        params.verbose = false;
+        params.presolve = false;
+        params.feasibility_polishing = false;
+        params.host_double_polishing = false;
+        params.termination_criteria.iteration_limit = 100000;
+        params.termination_criteria.time_sec_limit = 60.0;
+        return params;
+    };
+
+    bool valid = true;
+
+    {
+        // Primal infeasible (FP64 CPU path).
+        int row_ptr[] = {0, 1, 2};
+        int col_ind[] = {0, 0};
+        double values[] = {1.0, 1.0};
+        double obj[] = {0.0};
+        double con_lb[] = {3.0, 2.0};
+        double con_ub[] = {3.0, 2.0};
+        double var_lb[] = {-INFINITY};
+        double var_ub[] = {INFINITY};
+        pdhg_parameters_t params = make_params();
+        MlxPdlpSolver solver(1, 2, row_ptr, col_ind, values, var_lb, var_ub,
+                             con_lb, con_ub, obj, 0.0, &params, mx::Device::cpu);
+        mlxpdlp_result_t *result = solver.solve();
+        valid = valid && result->termination_reason == TERMINATION_REASON_PRIMAL_INFEASIBLE &&
+                result->total_count < 100000;
+        std::printf("MLX/CPU  primal-infeasible certificate %s\n",
+                    result->termination_reason == TERMINATION_REASON_PRIMAL_INFEASIBLE
+                        ? "PASS" : "FAIL");
+        destroy_result(result);
+    }
+
+    const mx::Device devices[] = {mx::Device::cpu, mx::Device::gpu};
+    for (const mx::Device &device : devices) {
+        if (device.type == mx::Device::gpu && !mx::is_available(mx::Device::gpu)) {
+            continue;
+        }
+        int row_ptr[] = {0, 1};
+        int col_ind[] = {0};
+        double values[] = {1.0};
+        double obj[] = {-1.0};
+        double con_lb[] = {0.0};
+        double con_ub[] = {INFINITY};
+        double var_lb[] = {-INFINITY};
+        double var_ub[] = {INFINITY};
+        pdhg_parameters_t params = make_params();
+        MlxPdlpSolver solver(1, 1, row_ptr, col_ind, values, var_lb, var_ub,
+                             con_lb, con_ub, obj, 0.0, &params, device);
+        mlxpdlp_result_t *result = solver.solve();
+        const bool ok = result->termination_reason == TERMINATION_REASON_DUAL_INFEASIBLE &&
+                        result->total_count < 100000;
+        valid = valid && ok;
+        std::printf("%-8s dual-infeasible certificate %s\n", device_name(device),
+                    ok ? "PASS" : "FAIL");
+        destroy_result(result);
+    }
+    return valid;
+}
+
 bool metal_host_double_handoff_uses_saved_checkpoint() {
     int row_ptr[] = {0, 1};
     int col_ind[] = {0};
@@ -449,6 +760,22 @@ int main() {
     }
     if (!sparse_simdgroup_rows_match()) {
         std::fprintf(stderr, "sparse SIMD-group row regression failed\n");
+        return 1;
+    }
+    if (!sparse_fused_unfused_match()) {
+        std::fprintf(stderr, "fused/unfused Metal iteration regression failed\n");
+        return 1;
+    }
+    if (!sparse_fused_unfused_simdgroup_match()) {
+        std::fprintf(stderr, "fused/unfused SIMD-group Metal iteration regression failed\n");
+        return 1;
+    }
+    if (!spmv_simdgroup_threshold_override()) {
+        std::fprintf(stderr, "SpMV SIMD-group threshold override regression failed\n");
+        return 1;
+    }
+    if (!infeasibility_certificates_match()) {
+        std::fprintf(stderr, "infeasibility certificate regression failed\n");
         return 1;
     }
 

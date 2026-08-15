@@ -28,7 +28,9 @@ or the original cuPDLPx source tree.
 - Metal execution when MLX is built with `MLX_BUILD_METAL=ON`
 - CSR Metal matrix-vector products with a stored sparse transpose
 - Accelerate sparse CPU matrix-vector products for large CSR models
+- Fused single-kernel Metal PDHG half-steps with batched lazy evaluation
 - Halpern PDHG with adaptive restart and primal-weight control
+- Infeasibility and unboundedness certificates with active termination
 - Ruiz, Pock-Chambolle, and bound/objective preconditioning
 - Optional PSLP presolve, early termination, and solution postsolve
 - Primal and dual warm starts in original problem coordinates

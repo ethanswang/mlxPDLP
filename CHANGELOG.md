@@ -10,6 +10,33 @@ and the project intends to follow
 
 ### Added
 
+- Fused single-kernel Metal PDHG half-steps: CSR SpMV, scaled gradient step,
+  bound projection, reflection, Halpern weighting, and major-iteration
+  snapshots run in one dispatch per half-step across all three SpMV
+  strategies (`metal_fused_kernels`, enabled by default), with minor
+  iterations batched into memory-bounded lazy evaluations.
+- Active infeasibility/unboundedness termination through Farkas separation
+  ray certificates (primal ray for dual infeasibility, dual ray for primal
+  infeasibility), with significance floors and unit-consistent residual
+  ratio tests; the FP32 Metal path uses a relaxed ratio threshold to match
+  its arithmetic floor.
+- Absolute-value objective-gap comparisons in every optimality check so a
+  numerically negative gap cannot pass one-sided comparisons.
+- Device-tuned SpMV SIMD-group dispatch threshold (scaled by GPU family,
+  overridable with `MLXPDLP_SPMV_SIMD_NNZ_THRESHOLD`) and explicit FMA
+  accumulation in every Metal SpMV loop.
+- `fused|unfused` mode argument for the Metal acceleration example for
+  kernel-fusion A/B measurements.
+- Regression tests for fused/unfused iteration agreement (scalar, adaptive,
+  and SIMD-group dispatch), the SIMD-group threshold override, and the
+  primal/dual infeasibility certificates on CPU and Metal.
+
+### Changed
+
+- Metal iteration performance: the fixed-work 16K-128K acceleration sweep
+  improved from 1.2x-2.0x to 3.1x-6.5x versus CPU FP64 on an M3 Max by
+  fusing iteration kernels and batching evaluations.
+
 - An approval-gated, one-shot `make` workflow that reuses a local MLX package
   when available or downloads, builds, and privately installs the CI-tested
   MLX revision under `_deps/`.
