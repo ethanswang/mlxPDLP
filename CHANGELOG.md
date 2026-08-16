@@ -33,6 +33,14 @@ and the project intends to follow
 
 ### Changed
 
+- Batch fixed-point, residual, objective, restart-distance, and
+  infeasibility-ray reductions so each metric group needs one host
+  synchronization instead of serial scalar round trips.
+- Check sparse-Metal infeasibility certificates on the first block, about
+  every 1,000 iterations, and at iteration/time limits; CPU and dense paths
+  retain every-block checks.
+- Split fused Metal major/minor kernels so minor iterations expose only their
+  live state arrays and do not allocate three discarded snapshot outputs.
 - Metal iteration performance: the fixed-work 16K-128K acceleration sweep
   improved from 1.2x-2.0x to 3.1x-6.5x versus CPU FP64 on an M3 Max by
   fusing iteration kernels and batching evaluations.

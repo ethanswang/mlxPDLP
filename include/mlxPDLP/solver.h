@@ -199,7 +199,8 @@ struct MlxPdlpState {
           primal_res(_mlx_empty_array()), dual_res(_mlx_empty_array()), delta_x(_mlx_empty_array()),
           delta_y(_mlx_empty_array()), step_size(1.0), primal_weight(1.0), step_size_primal(1.0),
           step_size_dual(1.0), inner_count(0), total_count(0),
-          singular_value_iterations(0), absolute_primal_residual(0.0),
+          singular_value_iterations(0), infeasibility_check_count(0),
+          absolute_primal_residual(0.0),
           relative_primal_residual(0.0), absolute_dual_residual(0.0), relative_dual_residual(0.0),
           restart_relative_dual_residual(0.0),
           primal_objective_value(0.0), dual_objective_value(0.0), objective_gap(0.0),
@@ -299,6 +300,7 @@ struct MlxPdlpState {
     int inner_count;
     int total_count;
     int singular_value_iterations;
+    int infeasibility_check_count;
 
     // Residual / fixed-point scalars
     double absolute_primal_residual;
@@ -510,9 +512,12 @@ class MlxPdlpSolver {
     mx::array sparse_cpu_matvec(const mx::array &x, bool transpose, int rows);
 
     // Fused sparse-Metal PDHG half-steps. `scalars` is a float32 array of
-    // {step, reflection_coefficient, halpern_weight, major_flag}.
-    std::vector<mx::array> fused_primal_step(const mx::array &scalars);
-    std::vector<mx::array> fused_dual_step(const mx::array &scalars);
+    // {step, reflection_coefficient, halpern_weight}. Major variants return
+    // snapshot outputs; minor variants return only the two live state arrays.
+    std::vector<mx::array> fused_primal_step(const mx::array &scalars,
+                                             bool is_major);
+    std::vector<mx::array> fused_dual_step(const mx::array &scalars,
+                                           bool is_major);
 
     // ---- Scalar reductions ----
     double mlx_dot(const mx::array &a, const mx::array &b);

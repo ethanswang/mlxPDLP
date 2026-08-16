@@ -531,9 +531,9 @@ provenance, and the latest measured result.
 ## Project status
 
 mlxPDLP is an early standalone release. The highest-priority engineering work
-is active infeasibility-certificate termination (the ray machinery exists but
-is not yet wired into the iteration loop) and further reducing per-iteration
-device synchronization.
+is moving more sparse preprocessing and block-level array work onto Metal.
+Active Farkas infeasibility termination, batched block reductions, and a
+bounded sparse-Metal certificate cadence are wired into the iteration loop.
 
 ## Attribution
 

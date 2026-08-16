@@ -48,6 +48,8 @@ line number so it remains useful as the source evolves.
 | Active infeasibility-certificate termination | Implemented (Farkas separation ray tests) |
 | Fused single-kernel Metal PDHG half-steps | Implemented and enabled by default |
 | Batched lazy evaluation of fused iterations | Implemented with a memory-bounded batch |
+| Batched block-level scalar reductions | Implemented with one host synchronization per metric group |
+| Sparse Metal infeasibility-check cadence | First block, about every 1,000 iterations, and limit blocks |
 
 The C++ solver API lives in the `mlxpdlp` namespace. The C-compatible MPS
 loader uses globally visible `mlxpdlp_`-prefixed names.
@@ -390,8 +392,11 @@ matrix-vector product in an MLX primitive.
 On the sparse Metal path, each PDHG half-step runs as one fused kernel: CSR
 SpMV, scaled gradient step, bound projection, reflection, Halpern weighting,
 and (on major iterations) the `x_pdhg`/`y_pdhg`/`dual_slack` snapshots in a
-single dispatch. Six kernels exist (three dispatch strategies per direction);
-the update bodies replicate the MLX expression sequences so the fused path is
+single dispatch. Each of the three dispatch strategies in each direction has
+a major and minor variant. Major primal/dual kernels expose four/three
+outputs; minor kernels expose only `x_cur`/`x_ref` or `y_cur`/`y_ref`, avoiding
+three discarded snapshot-buffer allocations per minor iteration. The shared
+update bodies replicate the MLX expression sequences so the fused path is
 numerically comparable to the unfused one. Minor iterations accumulate in the
 lazy graph and are evaluated every `fused_eval_batch_size()` iterations (a
 memory-bounded batch, at most 16), so one `mx::eval` materializes many
@@ -424,6 +429,13 @@ scalars:
 | `mlx_norm2(v)` | `linalg::norm(v)` | `double` |
 | `mlx_norm_inf(v)` | `max(abs(v))` | `double` |
 | `mlx_sum(v)` | `sum(v)` | `double` |
+
+The periodic fixed-point calculation evaluates its two norms and cross term
+together. Residual evaluation likewise materializes all three residual norms
+and three objective reductions in one `mx::eval`; infeasibility evaluation
+materializes its six ray scalars together; and restart distance norms are read
+as a pair. Each group therefore incurs one host synchronization even though
+the backend may dispatch multiple reduction kernels inside that evaluation.
 
 ## Bounds and finite-safe arrays
 
@@ -629,7 +641,7 @@ Each block contains:
 
 Major iterations store `x_pdhg`, `y_pdhg`, and `dual_slack`. Minor
 iterations advance the running `x_cur` and `y_cur` without replacing those
-candidate snapshots.
+candidate snapshots or allocating outputs for them on the fused Metal path.
 
 ### Primal update
 
@@ -796,7 +808,7 @@ Restart then:
 `mlx_check_termination()` checks, in order:
 
 1. L2 optimality (gap compared in absolute value);
-2. infeasibility certification (Farkas separation ray tests);
+2. scheduled infeasibility certification (Farkas separation ray tests);
 3. the host-FP64 handoff gates when enabled;
 4. iteration limit;
 5. time limit.
@@ -831,11 +843,18 @@ original problem data and the recession-cone residual is small relative to
 the gap, with residual ratios compared in consistent working units. The
 FP64 CPU path uses `eps_feasible_relative` for the ratio; the FP32 Metal
 path uses at least 1e-3 because FP32 ray arithmetic floors the attainable
-ratio. Both reference implementations are more conservative: cuPDLPx
+ratio. CPU and dense execution check certificates every evaluation block.
+Sparse Metal checks the first block, then at a block boundary approximately
+every 1,000 iterations, and always on iteration/time-limit blocks; easy
+certificates therefore retain first-block termination while routine blocks
+avoid two extra SpMVs. Both rays and all six certificate reductions share one
+lazy evaluation and one host synchronization. Both reference implementations
+are more conservative: cuPDLPx
 computes ray metrics but never calls its criteria, and HPR-LP-C relies
 entirely on PSLP presolve for infeasibility proofs.
 
-Timing uses `clock()` and is stored in `cumulative_time_sec`.
+Timing uses `std::chrono::steady_clock` and is stored in
+`cumulative_time_sec`.
 
 ## Result extraction and ownership
 
@@ -910,7 +929,7 @@ CTest registers:
 | `netlib_convergence_example` | Netlib ADLITTLE convergence sweep and published-objective check |
 | `mlx_basic` | Basic MLX CPU array operations |
 | `solver` | Solver, warm-start, presolve, postsolve, termination, and FP64 Farkas infeasibility-certificate regressions |
-| `device_comparison` | Analytic and sparse LPs on CPU and GPU, fused/unfused iteration agreement across all three SpMV strategies, SIMD-group threshold override, and the FP32 Metal infeasibility certificate |
+| `device_comparison` | Analytic and sparse LPs on CPU and GPU, fused/unfused iteration agreement across all three SpMV strategies, SIMD-group threshold override, FP32 Metal infeasibility certificates, and sparse-Metal certificate cadence |
 | `mps_device_comparison` | Bundled Netlib ADLITTLE MPS on CPU and GPU |
 | `netlib_regression_cpu` | Opt-in downloaded 40-case Netlib audit on CPU FP64 |
 | `netlib_regression_metal` | Opt-in downloaded 40-case Netlib audit on Metal FP32 |
@@ -975,13 +994,10 @@ back to the original cuPDLPx checkout.
    iterate mapping, so callers must choose one feature per solve.
 3. **Fused kernels cover the sparse Metal path only.** Dense-fallback and
    CPU problems still use the unfused MLX-expression formulation.
-4. **Infeasibility certification uses L2-norm reduction reads.** The ray
-   checks perform two extra SpMVs and several host-synchronizing reductions
-   per evaluation block.
-5. **Core minimization semantics.** Maximize sense is normalized by callers,
+4. **Core minimization semantics.** Maximize sense is normalized by callers,
    including the MPS comparison.
 
 The next performance priorities are moving sparse preprocessing to Metal if
 host setup becomes material, and widening the fused kernels to cover the
-residual and fixed-point SpMVs so block-level reductions run as single
-dispatches.
+residual and fixed-point SpMVs so their remaining block-level array work runs
+in fewer dispatches.

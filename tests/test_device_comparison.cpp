@@ -726,6 +726,57 @@ bool infeasibility_certificates_match() {
     return ok;
 }
 
+bool sparse_metal_infeasibility_checks_are_gated() {
+    // A feasible sparse fixture that cannot satisfy the strict-zero stopping
+    // tolerances. With eval_freq=50 and a 1050-iteration limit, certificate
+    // information is due only on the first block, at iteration 1000, and on
+    // the final limit block.
+    constexpr int size = 64;
+    std::vector<int> row_ptr(static_cast<size_t>(size) + 1);
+    std::vector<int> col_ind(static_cast<size_t>(size));
+    std::vector<double> values(static_cast<size_t>(size), 1.0);
+    for (int row = 0; row < size; ++row) {
+        row_ptr[static_cast<size_t>(row)] = row;
+        col_ind[static_cast<size_t>(row)] = row;
+    }
+    row_ptr.back() = size;
+
+    std::vector<double> objective(static_cast<size_t>(size), 0.0);
+    std::vector<double> constraint_bound(static_cast<size_t>(size), 1.0);
+    std::vector<double> variable_lb(static_cast<size_t>(size), 0.0);
+    std::vector<double> variable_ub(static_cast<size_t>(size), 2.0);
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.feasibility_polishing = false;
+    params.host_double_polishing = false;
+    params.sv_max_iter = 2;
+    params.termination_evaluation_frequency = 50;
+    params.termination_criteria.eps_optimal_relative = 0.0;
+    params.termination_criteria.eps_feasible_relative = 0.0;
+    params.termination_criteria.iteration_limit = 1050;
+    params.termination_criteria.time_sec_limit = 10.0;
+
+    MlxPdlpSolver solver(size, size, row_ptr.data(), col_ind.data(), values.data(),
+                         variable_lb.data(), variable_ub.data(),
+                         constraint_bound.data(), constraint_bound.data(),
+                         objective.data(), 0.0, &params, mx::Device::gpu);
+    mlxpdlp_result_t *result = solver.solve();
+    mx::synchronize(solver.state().stream);
+    const bool valid = solver.state().sparse_metal_active &&
+                       result->termination_reason ==
+                           TERMINATION_REASON_ITERATION_LIMIT &&
+                       result->total_count == 1050 &&
+                       solver.state().infeasibility_check_count == 3;
+    std::printf("MLX/GPU  gated infeasibility checks count=%d %s\n",
+                solver.state().infeasibility_check_count,
+                valid ? "PASS" : "FAIL");
+    destroy_result(result);
+    return valid;
+}
+
 bool metal_host_double_handoff_uses_saved_checkpoint() {
     int row_ptr[] = {0, 1};
     int col_ind[] = {0};
@@ -860,6 +911,10 @@ int main() {
     }
     if (!infeasibility_certificates_match()) {
         std::fprintf(stderr, "infeasibility certificate regression failed\n");
+        return 1;
+    }
+    if (!sparse_metal_infeasibility_checks_are_gated()) {
+        std::fprintf(stderr, "sparse Metal infeasibility cadence regression failed\n");
         return 1;
     }
 
