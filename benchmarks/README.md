@@ -100,11 +100,11 @@ trajectory.
 Every returned solution is also rechecked against the original, unscaled MPS
 model on the CPU in float64. This audit recomputes `Ax`, `A^T y`, primal and
 dual objectives, variable-bound violations, and the CUDA-normalized gap. It
-is deliberately report-only by default because reduced-model stopping and
-postsolve can differ from the original-model certificate: `OPTIMAL` means the solver's internal metrics met the requested
-tolerance, while `verified` records whether the independent float64 metrics
-also met the requested audit tolerance. Because the internal target is
-stricter by default, an audited `1e-4` solution can legitimately have
+is deliberately report-only by default. `OPTIMAL` means the solver's own
+original-model certificate met its requested tolerances, while `verified`
+records whether the benchmark runner's independent float64 metrics met the
+requested audit tolerance. Because the solver target is stricter by default,
+an audited `1e-4` solution can legitimately have
 `verified: true` with an internal `TIME_LIMIT` or `ITERATION_LIMIT` status.
 Pass
 `--fail-on-validation` when CI should return nonzero for an audit failure.

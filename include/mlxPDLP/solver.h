@@ -384,7 +384,8 @@ class MlxPdlpSolver {
 
     ~MlxPdlpSolver();
 
-    // Run the full PDHG algorithm. Returns heap-allocated result.
+    // Run the full PDHG algorithm. Returns a heap-allocated result. Solver
+    // instances are single-use; a second call throws std::logic_error.
     mlxpdlp_result_t *solve();
 
     // Accessors for debugging / inspection
@@ -408,6 +409,7 @@ class MlxPdlpSolver {
     [[maybe_unused]] int presolve_status_ = 0;
     [[maybe_unused]] double presolve_time_sec_ = 0.0;
     bool presolve_solved_ = false;
+    bool solve_called_ = false;
     bool has_warm_start_ = false;
     bool has_reduced_cost_start_ = false;
     std::vector<double> warm_reduced_cost_;

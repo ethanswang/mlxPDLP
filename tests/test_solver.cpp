@@ -574,11 +574,11 @@ test_cleanup:
     mlxpdlp_result_free(result);
 }
 
-// Test 7: Repeated solves (no memory leaks)
+// Test 7: Repeated fresh solver instances (no memory leaks)
 // ---------------------------------------------------------------------------
 
 static void test_repeat_solve() {
-    TEST("repeated solves");
+    TEST("repeated fresh solver instances");
 
     int m = 3, n = 2;
 
@@ -613,6 +613,55 @@ static void test_repeat_solve() {
     }
     PASS();
 test_cleanup:;
+}
+
+static void test_solver_rejects_second_solve() {
+    TEST("solver rejects a second solve call");
+
+    int row_ptr[] = {0, 2, 4, 6};
+    int col_ind[] = {0, 1, 0, 1, 0, 1};
+    double vals[] = {1.0, 2.0, 0.0, 1.0, 3.0, 2.0};
+    double obj[] = {1.0, 1.0};
+    double con_lb[] = {5.0, -INFINITY, -INFINITY};
+    double con_ub[] = {5.0, 2.0, 8.0};
+    double var_lb[] = {0.0, 0.0};
+    double var_ub[] = {INFINITY, INFINITY};
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.termination_evaluation_frequency = 50;
+    params.termination_criteria.eps_optimal_relative = 1e-6;
+    params.termination_criteria.eps_feasible_relative = 1e-6;
+    set_safe_limits(&params);
+
+    mlxpdlp_result_t *first = nullptr;
+    mlxpdlp_result_t *unexpected = nullptr;
+    bool rejected = false;
+    bool diagnostic_matches = false;
+    MlxPdlpSolver solver(2, 3, row_ptr, col_ind, vals, var_lb, var_ub, con_lb,
+                         con_ub, obj, 0.0, &params);
+    first = solver.solve();
+    mlxpdlp_result_free(first);
+    first = nullptr;
+    try {
+        unexpected = solver.solve();
+    } catch (const std::logic_error &error) {
+        rejected = true;
+        diagnostic_matches =
+            std::strstr(error.what(), "may only be called once") != nullptr;
+    }
+
+    CHECK(rejected, "second solve call must throw std::logic_error");
+    CHECK(diagnostic_matches, "second solve diagnostic must explain the single-use contract");
+
+    mlxpdlp_result_free(unexpected);
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(first);
+    mlxpdlp_result_free(unexpected);
 }
 
 // ---------------------------------------------------------------------------
@@ -1408,6 +1457,131 @@ test_cleanup:
     mlxpdlp_result_free(result);
 }
 
+static void test_original_certificate_demotes_all_failed_metrics() {
+    TEST("original certificate demotes every failed audited metric");
+
+    enum class ExpectedFailure { none, primal, variable_bound, dual, gap };
+    struct AuditCase {
+        const char *name;
+        ExpectedFailure failure;
+        int nonzeros;
+        double matrix_value;
+        double objective;
+        double variable_lower;
+        double variable_upper;
+        double constraint_lower;
+        double constraint_upper;
+        double primal_start;
+        double dual_start;
+        double reduced_cost_start;
+    };
+    const AuditCase cases[] = {
+        {"valid", ExpectedFailure::none, 0, 0.0, 0.0, 0.0, 1.0,
+         -INFINITY, INFINITY, 0.0, 0.0, 0.0},
+        {"primal", ExpectedFailure::primal, 1, 1.0, 0.0, 0.0, INFINITY,
+         1.0, 1.0, 0.0, 0.0, 0.0},
+        {"variable-bound", ExpectedFailure::variable_bound, 0, 0.0, 0.0,
+         0.0, 1.0, -INFINITY, INFINITY, 2.0, 0.0, 0.0},
+        {"dual", ExpectedFailure::dual, 0, 0.0, 1.0, -INFINITY, INFINITY,
+         -INFINITY, INFINITY, 0.0, 0.0, 0.0},
+        {"gap", ExpectedFailure::gap, 0, 0.0, 1.0, 0.0, 1.0,
+         -INFINITY, INFINITY, 1.0, 0.0, 1.0},
+    };
+
+    constexpr double tolerance = 1e-8;
+    bool all_valid = true;
+    mlxpdlp_result_t *result = nullptr;
+    for (const AuditCase &audit_case : cases) {
+        int row_ptr[] = {0, audit_case.nonzeros};
+        int col_ind[] = {0};
+        double values[] = {audit_case.matrix_value};
+        double objective[] = {audit_case.objective};
+        double var_lb[] = {audit_case.variable_lower};
+        double var_ub[] = {audit_case.variable_upper};
+        double con_lb[] = {audit_case.constraint_lower};
+        double con_ub[] = {audit_case.constraint_upper};
+        double primal_start[] = {audit_case.primal_start};
+        double dual_start[] = {audit_case.dual_start};
+        double reduced_cost_start[] = {audit_case.reduced_cost_start};
+
+        pdhg_parameters_t params;
+        mlxpdlp_set_default_parameters(&params);
+        params.verbose = false;
+        params.presolve = false;
+        params.curtis_reid_iterations = 0;
+        params.l_inf_ruiz_iterations = 0;
+        params.has_pock_chambolle_alpha = false;
+        params.bound_objective_rescaling = false;
+        params.feasibility_polishing = false;
+        params.host_double_polishing = false;
+        params.host_double_early_handoff = false;
+        params.termination_evaluation_frequency = 2;
+        params.termination_criteria.eps_optimal_relative = tolerance;
+        params.termination_criteria.eps_feasible_relative = tolerance;
+        params.termination_criteria.iteration_limit = 0;
+        params.termination_criteria.time_sec_limit = 2.0;
+
+        MlxPdlpSolver solver(
+            1, 1, row_ptr,
+            audit_case.nonzeros == 0 ? nullptr : col_ind,
+            audit_case.nonzeros == 0 ? nullptr : values,
+            var_lb, var_ub, con_lb, con_ub, objective, 0.0, &params,
+            primal_start, dual_start, reduced_cost_start, mx::Device::cpu);
+        // Simulate an internal stopping decision immediately before extraction.
+        // With zero iterations, the original-model audit is the only component
+        // that may revise this stamp.
+        const_cast<MlxPdlpState &>(solver.state()).termination_reason =
+            TERMINATION_REASON_OPTIMAL;
+        result = solver.solve();
+
+        const bool primal_failed =
+            !std::isfinite(result->relative_primal_residual) ||
+            result->relative_primal_residual >= tolerance;
+        const double primal = result->primal_solution[0];
+        const bool variable_bound_failed =
+            !std::isfinite(primal) ||
+            (std::isfinite(audit_case.variable_lower) &&
+             primal < audit_case.variable_lower) ||
+            (std::isfinite(audit_case.variable_upper) &&
+             primal > audit_case.variable_upper);
+        const bool dual_failed =
+            !std::isfinite(result->relative_dual_residual) ||
+            result->relative_dual_residual >= tolerance;
+        const bool gap_failed =
+            !std::isfinite(result->relative_objective_gap) ||
+            std::fabs(result->relative_objective_gap) >= tolerance;
+
+        const bool expected_primal = audit_case.failure == ExpectedFailure::primal;
+        const bool expected_bound =
+            audit_case.failure == ExpectedFailure::variable_bound;
+        const bool expected_dual = audit_case.failure == ExpectedFailure::dual;
+        const bool expected_gap = audit_case.failure == ExpectedFailure::gap;
+        const termination_reason_t expected_status =
+            audit_case.failure == ExpectedFailure::none
+                ? TERMINATION_REASON_OPTIMAL
+                : TERMINATION_REASON_UNSPECIFIED;
+        const bool valid = primal_failed == expected_primal &&
+                           variable_bound_failed == expected_bound &&
+                           dual_failed == expected_dual && gap_failed == expected_gap &&
+                           result->termination_reason == expected_status;
+        if (!valid) {
+            std::printf("[%s status=%d failures=(%d,%d,%d,%d)] ", audit_case.name,
+                        static_cast<int>(result->termination_reason), primal_failed,
+                        variable_bound_failed, dual_failed, gap_failed);
+            all_valid = false;
+        }
+        mlxpdlp_result_free(result);
+        result = nullptr;
+    }
+
+    CHECK(all_valid, "each failed original-model audit must demote OPTIMAL");
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(result);
+}
+
 static void test_host_double_polish_repairs_variable_bounds() {
     TEST("host-double polish repairs a bound-only violation");
 
@@ -1753,6 +1927,7 @@ int main() {
     test_result_struct();
     test_iteration_limit_returns_best_iterate();
     test_repeat_solve();
+    test_solver_rejects_second_solve();
     test_singular_value_nullspace_start();
     test_duplicate_csr_entries();
 #if defined(__APPLE__)
@@ -1770,6 +1945,7 @@ int main() {
     test_warm_start_validation();
     test_cpu_scalar_arithmetic_preserves_fp64();
     test_original_certificate_checks_variable_bounds();
+    test_original_certificate_demotes_all_failed_metrics();
     test_host_double_polish_repairs_variable_bounds();
     test_pdhg_infeasibility_certificates();
 #ifdef MLXPDLP_TEST_HAS_PRESOLVE

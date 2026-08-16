@@ -508,6 +508,117 @@ bool sparse_fused_unfused_simdgroup_match() {
     return valid;
 }
 
+bool sparse_fused_short_dimension_boundary_match() {
+    // MLX passes arrays with fewer than eight elements in constant address
+    // space. Cross that boundary in each solver dimension while keeping every
+    // fixture eligible for sparse Metal.
+    struct ShapeCase {
+        int columns;
+        int rows;
+        int entries_per_row;
+    };
+    constexpr std::array<ShapeCase, 4> cases{{
+        {2000, 7, 500},
+        {2000, 8, 500},
+        {7, 1000, 1},
+        {8, 1000, 2},
+    }};
+
+    for (const ShapeCase &shape : cases) {
+        std::vector<int> row_ptr(static_cast<size_t>(shape.rows) + 1);
+        std::vector<int> col_ind;
+        std::vector<double> values;
+        col_ind.reserve(static_cast<size_t>(shape.rows) * shape.entries_per_row);
+        values.reserve(static_cast<size_t>(shape.rows) * shape.entries_per_row);
+        for (int row = 0; row < shape.rows; ++row) {
+            row_ptr[static_cast<size_t>(row)] = static_cast<int>(col_ind.size());
+            for (int entry = 0; entry < shape.entries_per_row; ++entry) {
+                col_ind.push_back((row * shape.entries_per_row + entry) % shape.columns);
+                values.push_back(1.0);
+            }
+        }
+        row_ptr.back() = static_cast<int>(col_ind.size());
+
+        std::vector<double> objective(static_cast<size_t>(shape.columns), 0.0);
+        std::vector<double> variable_lb(static_cast<size_t>(shape.columns), 0.0);
+        std::vector<double> variable_ub(static_cast<size_t>(shape.columns), 2.0);
+        std::vector<double> constraint_bound(static_cast<size_t>(shape.rows),
+                                             shape.entries_per_row);
+
+        auto solve_once = [&](bool fused) {
+            pdhg_parameters_t params;
+            mlxpdlp_set_default_parameters(&params);
+            params.verbose = false;
+            params.metal_fused_kernels = fused;
+            params.presolve = false;
+            params.curtis_reid_iterations = 0;
+            params.l_inf_ruiz_iterations = 0;
+            params.has_pock_chambolle_alpha = false;
+            params.bound_objective_rescaling = false;
+            params.feasibility_polishing = false;
+            params.host_double_polishing = false;
+            params.sv_max_iter = 2;
+            params.termination_evaluation_frequency = 2;
+            params.termination_criteria.eps_optimal_relative = 0.0;
+            params.termination_criteria.eps_feasible_relative = 0.0;
+            params.termination_criteria.iteration_limit = 2;
+            params.termination_criteria.time_sec_limit = 10.0;
+
+            MlxPdlpSolver solver(shape.columns, shape.rows, row_ptr.data(), col_ind.data(),
+                                 values.data(), variable_lb.data(), variable_ub.data(),
+                                 constraint_bound.data(), constraint_bound.data(),
+                                 objective.data(), 0.0, &params, mx::Device::gpu);
+            if (!solver.expects_sparse_metal_backend()) {
+                throw std::runtime_error("fixture did not select sparse Metal");
+            }
+            mlxpdlp_result_t *result = solver.solve();
+            if (!solver.state().sparse_metal_active) {
+                destroy_result(result);
+                throw std::runtime_error("sparse Metal backend was not activated");
+            }
+            return result;
+        };
+
+        mlxpdlp_result_t *fused = nullptr;
+        mlxpdlp_result_t *unfused = nullptr;
+        try {
+            fused = solve_once(true);
+            unfused = solve_once(false);
+            mx::synchronize();
+        } catch (const std::exception &error) {
+            destroy_result(fused);
+            destroy_result(unfused);
+            std::fprintf(stderr,
+                         "MLX/GPU fused address-space boundary n=%d m=%d threw: %s\n",
+                         shape.columns, shape.rows, error.what());
+            return false;
+        }
+
+        bool valid = fused && unfused && fused->total_count == unfused->total_count;
+        for (int col = 0; col < shape.columns && valid; ++col) {
+            valid = std::fabs(fused->primal_solution[col] -
+                              unfused->primal_solution[col]) <=
+                    1e-6 * (1.0 + std::fabs(unfused->primal_solution[col]));
+        }
+        for (int row = 0; row < shape.rows && valid; ++row) {
+            valid = std::fabs(fused->dual_solution[row] -
+                              unfused->dual_solution[row]) <=
+                    1e-6 * (1.0 + std::fabs(unfused->dual_solution[row]));
+        }
+        destroy_result(fused);
+        destroy_result(unfused);
+        if (!valid) {
+            std::fprintf(stderr,
+                         "MLX/GPU fused address-space boundary n=%d m=%d mismatch\n",
+                         shape.columns, shape.rows);
+            return false;
+        }
+    }
+
+    std::printf("MLX/GPU  fused short-dimension address-space boundary PASS\n");
+    return true;
+}
+
 bool spmv_simdgroup_threshold_override() {
     // A uniform 32-entry-row matrix lies below the default SIMD-group
     // aggregate-work cutoff (adaptive path), but above a small explicit
@@ -737,6 +848,10 @@ int main() {
     }
     if (!sparse_fused_unfused_simdgroup_match()) {
         std::fprintf(stderr, "fused/unfused SIMD-group Metal iteration regression failed\n");
+        return 1;
+    }
+    if (!sparse_fused_short_dimension_boundary_match()) {
+        std::fprintf(stderr, "fused short-dimension Metal regression failed\n");
         return 1;
     }
     if (!spmv_simdgroup_threshold_override()) {

@@ -1213,12 +1213,16 @@ namespace {
 // MSL header shared by all six fused kernels. The scalar block is
 // {step, reflection_coefficient, halpern_weight, major_flag} in float32.
 const char *fused_step_header() {
+    // MLX selects constant or device address space from each input's element
+    // count. Template the complete read-pointer type so either signature can
+    // call the shared update helpers.
     static const std::string header = R"(
+template <typename PrimalInputPtr>
 inline void fused_primal_update(
     uint row,
     float product,
-    const device float* x_cur, const device float* x_init,
-    const device float* obj, const device float* var_lb, const device float* var_ub,
+    PrimalInputPtr x_cur, PrimalInputPtr x_init,
+    PrimalInputPtr obj, PrimalInputPtr var_lb, PrimalInputPtr var_ub,
     const constant float* scalars,
     device float* x_cur_out, device float* x_ref_out,
     device float* x_pdhg_out, device float* dual_slack_out) {
@@ -1237,11 +1241,12 @@ inline void fused_primal_update(
     }
 }
 
+template <typename DualInputPtr>
 inline void fused_dual_update(
     uint row,
     float product,
-    const device float* y_cur, const device float* y_init,
-    const device float* con_lb, const device float* con_ub,
+    DualInputPtr y_cur, DualInputPtr y_init,
+    DualInputPtr con_lb, DualInputPtr con_ub,
     const constant float* scalars,
     device float* y_cur_out, device float* y_ref_out,
     device float* y_pdhg_out) {
@@ -3598,13 +3603,10 @@ double MlxPdlpSolver::recompute_original_certificate(mlxpdlp_result_t *result) {
         std::fabs(result->relative_objective_gap) < criteria.eps_optimal_relative;
     if (certificate_is_optimal) {
         result->termination_reason = TERMINATION_REASON_OPTIMAL;
-    } else if ((!std::isfinite(relative_variable_bound_violation) ||
-                relative_variable_bound_violation >=
-                    criteria.eps_feasible_relative) &&
-               result->termination_reason == TERMINATION_REASON_OPTIMAL) {
-        // Existing stopping metrics are reported independently from this
-        // original-model audit. Preserve their historical status semantics,
-        // but never allow an OPTIMAL stamp to survive a failed bound check.
+    } else if (result->termination_reason == TERMINATION_REASON_OPTIMAL) {
+        // An OPTIMAL status must agree with every original-model metric stored
+        // in the result: primal feasibility, variable bounds, dual feasibility,
+        // and objective gap.
         result->termination_reason = TERMINATION_REASON_UNSPECIFIED;
     }
     return relative_variable_bound_violation;
@@ -3904,6 +3906,12 @@ mlxpdlp_result_t *MlxPdlpSolver::extract_presolve_result() {
 // ---------------------------------------------------------------------------
 
 mlxpdlp_result_t *MlxPdlpSolver::solve() {
+    if (solve_called_) {
+        throw std::logic_error(
+            "MlxPdlpSolver::solve() may only be called once; construct a new solver instance");
+    }
+    solve_called_ = true;
+
     // Every MLX operation in the solve path omits an explicit stream, so scope
     // MLX's defaults to the stream selected in the constructor.
     mx::StreamContext stream_context(s_.stream);
