@@ -44,6 +44,12 @@ and the project intends to follow
 - Metal iteration performance: the fixed-work 16K-128K acceleration sweep
   improved from 1.2x-2.0x to 3.1x-6.5x versus CPU FP64 on an M3 Max by
   fusing iteration kernels and batching evaluations.
+- The benchmark portfolio now falls back to the HPR restart policy when the
+  cuPDLPx PID portfolio fails the original-model float64 audit, re-running
+  the scaling families with a fresh warm-start correction gate. Netlib
+  FORPLAN's FP32 Metal trajectory strands the PID dual certificate beyond
+  the published-objective tolerance and now passes through the HPR family.
+
 - The SpMV SIMD-group dispatch threshold now parses the Apple Silicon family
   generation from the device name instead of matching a fixed M1-M4 list,
   covering M5 and newer families automatically.

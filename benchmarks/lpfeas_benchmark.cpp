@@ -244,6 +244,8 @@ struct RunRecord {
     std::string host_handoff_maturity_retry_reason;
     bool scaling_fallback_attempted = false;
     std::string scaling_fallback_reason;
+    bool restart_policy_fallback_attempted = false;
+    std::string restart_policy_fallback_reason;
     int selected_curtis_reid_iterations = 0;
     int rows = 0;
     int columns = 0;
@@ -1004,7 +1006,7 @@ RunRecord run_attempt(const ManifestEntry &entry, const fs::path &instance_path,
     return record;
 }
 
-RunRecord run_instance(const ManifestEntry &entry, const Options &options) {
+RunRecord run_instance(const ManifestEntry &entry, Options options) {
     RunRecord record;
     record.manifest = entry;
     const fs::path instance_path = options.data_directory / (entry.name + ".mps.gz");
@@ -1067,6 +1069,7 @@ RunRecord run_instance(const ManifestEntry &entry, const Options &options) {
         bool host_handoff_maturity_retry_attempted = false;
         bool presolve_fallback_attempted = false;
         bool scaling_fallback_attempted = false;
+        bool restart_policy_fallback_attempted = false;
         std::vector<std::string> attempt_errors;
         std::vector<double> correction_primal;
         std::vector<double> correction_dual;
@@ -1081,13 +1084,17 @@ RunRecord run_instance(const ManifestEntry &entry, const Options &options) {
         constexpr double direct_correction_dual_threshold = 0.5;
         constexpr double mapped_dual_reuse_limit = 1.0;
 
-        auto attempt_label = [](bool presolve, bool primal_propagation,
-                                int curtis_reid_iterations) {
+        auto attempt_label = [&](bool presolve, bool primal_propagation,
+                                 int curtis_reid_iterations) {
             const std::string presolve_label =
                 presolve ? (primal_propagation ? "presolve/propagate" : "presolve/safe")
                           : "no-presolve";
-            return presolve_label + ", CR=" +
-                   std::to_string(curtis_reid_iterations);
+            std::string label = presolve_label + ", CR=" +
+                               std::to_string(curtis_reid_iterations);
+            if (options.restart_policy == 1) {
+                label += ", HPR";
+            }
+            return label;
         };
         auto execute_attempt = [&](bool presolve, bool primal_propagation,
                                    int curtis_reid_iterations,
@@ -1313,6 +1320,28 @@ RunRecord run_instance(const ManifestEntry &entry, const Options &options) {
             }
         }
 
+        // A PID-restarted FP32 trajectory can strand the dual certificate in
+        // a poor basin (Netlib FORPLAN on Metal). The HPR movement-ratio
+        // sigma update explores a different restart path; re-run the
+        // portfolio with it when the cuPDLPx PID portfolio fails the
+        // original-model float64 audit.
+        if (!record.verified && options.restart_policy == 0) {
+            restart_policy_fallback_attempted = true;
+            // The warm-start correction gate is per-family: the PID family
+            // may have consumed it, but the HPR family benefits from the
+            // same audited primal seed (FORPLAN's passing HPR attempt is a
+            // warm original-model solve).
+            warm_start_correction_attempted = false;
+            options.restart_policy = 1;
+            execute_scaling_family(options.curtis_reid_iterations);
+            if (!record.verified && options.retry_without_curtis_reid &&
+                options.curtis_reid_iterations > 0) {
+                scaling_fallback_attempted = true;
+                execute_scaling_family(0);
+            }
+            options.restart_policy = 0;
+        }
+
         if (!have_candidate) {
             throw std::runtime_error(attempt_errors.empty()
                                          ? "no benchmark attempt completed"
@@ -1344,6 +1373,12 @@ RunRecord run_instance(const ManifestEntry &entry, const Options &options) {
         if (scaling_fallback_attempted) {
             record.scaling_fallback_reason =
                 "CR=0 configurations evaluated after float64 audit failure";
+        }
+        record.restart_policy_fallback_attempted =
+            restart_policy_fallback_attempted;
+        if (restart_policy_fallback_attempted) {
+            record.restart_policy_fallback_reason =
+                "HPR restart policy evaluated after PID portfolio audit failure";
         }
 
         record.manifest = entry;
@@ -1404,7 +1439,8 @@ void write_csv_header(std::ostream &output) {
               "propagation_fallback_reason,warm_start_correction_attempted,"
               "warm_start_correction_reason,host_handoff_maturity_retry_attempted,"
               "host_handoff_maturity_retry_reason,scaling_fallback_attempted,"
-              "scaling_fallback_reason,error,validation_warning,rows,columns,nonzeros,reduced_rows,"
+              "scaling_fallback_reason,restart_policy_fallback_attempted,"
+              "restart_policy_fallback_reason,error,validation_warning,rows,columns,nonzeros,reduced_rows,"
               "reduced_columns,reduced_nonzeros,iterations,feasibility_iterations,host_double_iterations,host_double_handoff,sparse_metal,sparse_cpu,cpu_double_precision,"
               "parse_seconds,setup_seconds,presolve_seconds,rescaling_seconds,"
               "feasibility_polishing_seconds,host_double_polishing_seconds,solve_seconds,"
@@ -1433,7 +1469,10 @@ void write_csv_record(std::ostream &output, const RunRecord &record) {
            << (record.host_handoff_maturity_retry_attempted ? "true" : "false") << ','
            << csv_escape(record.host_handoff_maturity_retry_reason) << ','
            << (record.scaling_fallback_attempted ? "true" : "false") << ','
-           << csv_escape(record.scaling_fallback_reason) << ',' << csv_escape(record.error) << ','
+           << csv_escape(record.scaling_fallback_reason) << ','
+           << (record.restart_policy_fallback_attempted ? "true" : "false") << ','
+           << csv_escape(record.restart_policy_fallback_reason) << ','
+           << csv_escape(record.error) << ','
            << csv_escape(record.validation_warning) << ',' << record.rows << ',' << record.columns
            << ',' << record.nonzeros << ','
            << record.reduced_rows << ',' << record.reduced_columns << ','
@@ -1494,7 +1533,7 @@ void write_json(const fs::path &path, const Options &options,
     std::ofstream output(temporary, std::ios::trunc);
     if (!output)
         throw std::runtime_error("cannot write JSON report: " + temporary.string());
-    output << "{\n  \"schema_version\": 7,\n"
+    output << "{\n  \"schema_version\": 8,\n"
            << "  \"generated_at_utc\": \"" << json_escape(generated_at) << "\",\n"
            << "  \"solver\": \"mlxPDLP " << MLXPDLP_VERSION_STRING << "\",\n"
            << "  \"suite\": \""
@@ -1616,6 +1655,10 @@ void write_json(const fs::path &path, const Options &options,
                << (record.scaling_fallback_attempted ? "true" : "false")
                << ", \"scaling_fallback_reason\": \""
                << json_escape(record.scaling_fallback_reason) << "\""
+               << ", \"restart_policy_fallback_attempted\": "
+               << (record.restart_policy_fallback_attempted ? "true" : "false")
+               << ", \"restart_policy_fallback_reason\": \""
+               << json_escape(record.restart_policy_fallback_reason) << "\""
                << ", \"error\": \"" << json_escape(record.error)
                << "\", \"validation_warning\": \""
                << json_escape(record.validation_warning) << "\", "
@@ -1885,6 +1928,13 @@ int main(int argc, char **argv) {
                                   ? "presolve-propagate"
                                   : "presolve-safe")
                            : "original");
+            // A verified fallback-family attempt necessarily belongs to the
+            // HPR restart policy: the fallback only runs after every PID
+            // attempt failed the audit.
+            std::string selection_with_policy = selection;
+            if (record.restart_policy_fallback_attempted && record.verified) {
+                selection_with_policy += "/HPR";
+            }
             progress_printf(
                 "[done %d/%zu worker=%d] %s %-15s iter=%d polish=%d host64=%d "
                 "solve=%.3fs verify=%s rel=(%.3e, %.3e, %.3e) "
@@ -1897,7 +1947,7 @@ int main(int argc, char **argv) {
                 record.validation.relative_primal_residual,
                 record.validation.relative_dual_residual,
                 record.validation.relative_objective_gap, record.attempts,
-                selection, record.selected_curtis_reid_iterations,
+                selection_with_policy.c_str(), record.selected_curtis_reid_iterations,
                 record.error.empty() ? "" : " error=",
                 record.error.empty() ? "" : record.error.c_str(),
                 record.validation_warning.empty() || !record.error.empty() ? ""
