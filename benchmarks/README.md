@@ -131,6 +131,40 @@ protocol, selected worker count, and suite wall time. CSV and JSON are
 atomically republished after each completion, so a long suite run retains
 valid reports for completed rows if it is interrupted.
 
+## Staged LPfeas sweeps and result comparison
+
+`run_lpfeas_staged.sh` runs the 23 LPfeas instances that have recorded
+Metal/FP32 baselines in three serial stages, ordered by the last recorded
+wall time:
+
+```sh
+benchmarks/run_lpfeas_staged.sh easy    # ~22 min serial
+benchmarks/run_lpfeas_staged.sh medium  # ~2 h serial
+benchmarks/run_lpfeas_staged.sh hard    # ~21 h serial
+```
+
+Each instance runs with `--jobs 1` under the recorded protocol (1e-4 audit
+tolerance, 5e-5 solver target, 1,200 s per-attempt limit, Curtis-Reid 20,
+5,000 power-method iterations, host-double correction at 180 s / 300,000
+iterations) and writes `results/lpfeas-staged/<name>.csv/json`. Existing
+results are skipped, so an interrupted stage resumes where it left off. The
+default 120 s cooldown between instances (`COOLDOWN_SECONDS`) matters:
+back-to-back serial sweeps thermally throttle laptop GPUs — degme measured
+1073 s hot versus 422 s cool on identical code — and throttled wall times
+cannot be compared with recorded ones.
+
+Compare a staged run against the recorded baselines with:
+
+```sh
+python3 benchmarks/compare_lpfeas_results.py results/lpfeas-staged
+```
+
+It pairs each result with the newest recorded `lpfeas-<name>-metal-fp32.json`
+and prints verified status, termination, iteration counts, and solve times
+with percentage deltas. Iteration counts and verified status are the robust
+regression axes; treat solve-time deltas below ~30% as environmental noise
+unless a cooled re-run reproduces them.
+
 Compare measured solve times to one of the four published NVIDIA B200 GPU
 columns with:
 
