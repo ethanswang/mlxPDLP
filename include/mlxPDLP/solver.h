@@ -90,6 +90,8 @@ typedef struct {
     bool verbose;
     int termination_evaluation_frequency;
     int sv_max_iter;
+    // Relative change in the squared singular-value estimate over a short
+    // convergence window, not an eigenvector-residual tolerance.
     double sv_tol;
     termination_criteria_t termination_criteria;
     restart_parameters_t restart_params;
@@ -196,7 +198,8 @@ struct MlxPdlpState {
           dual_slack_best(_mlx_empty_array()),
           primal_res(_mlx_empty_array()), dual_res(_mlx_empty_array()), delta_x(_mlx_empty_array()),
           delta_y(_mlx_empty_array()), step_size(1.0), primal_weight(1.0), step_size_primal(1.0),
-          step_size_dual(1.0), inner_count(0), total_count(0), absolute_primal_residual(0.0),
+          step_size_dual(1.0), inner_count(0), total_count(0),
+          singular_value_iterations(0), absolute_primal_residual(0.0),
           relative_primal_residual(0.0), absolute_dual_residual(0.0), relative_dual_residual(0.0),
           restart_relative_dual_residual(0.0),
           primal_objective_value(0.0), dual_objective_value(0.0), objective_gap(0.0),
@@ -295,6 +298,7 @@ struct MlxPdlpState {
     // Iteration counters
     int inner_count;
     int total_count;
+    int singular_value_iterations;
 
     // Residual / fixed-point scalars
     double absolute_primal_residual;

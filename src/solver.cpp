@@ -36,6 +36,7 @@ limitations under the License.
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -222,7 +223,7 @@ void mlxpdlp_set_default_parameters(pdhg_parameters_t *p) {
     p->host_double_polishing_iteration_limit = 50000;
     p->host_double_polishing_time_sec_limit = 30.0;
     p->reflection_coefficient = 1.0;
-    p->sv_max_iter = 5000;
+    p->sv_max_iter = 200;
     p->sv_tol = 1e-4;
     p->termination_criteria.eps_optimal_relative = 1e-4;
     p->termination_criteria.eps_feasible_relative = 1e-4;
@@ -2045,6 +2046,7 @@ void MlxPdlpSolver::mlx_bound_objective_scaling() {
 
 double MlxPdlpSolver::mlx_estimate_max_singular_value() {
     int m = s_.m;
+    constexpr int convergence_window = 10;
 
     // Match the CUDA references' deterministic random-normal start. Compared
     // with an all-ones vector this avoids symmetry-induced nullspace starts and
@@ -2066,24 +2068,35 @@ double MlxPdlpSolver::mlx_estimate_max_singular_value() {
         auto flat_A = mx::reshape(s_.A, {s_.m * s_.n});
         return mlx_norm2(flat_A);
     };
+    double eigen_norm = mlx_norm2(eigen);
+    if (eigen_norm < 1e-14) {
+        return compute_frobenius_norm();
+    }
+    eigen = eigen / mlx_scalar_like(eigen_norm, eigen);
+
+    std::array<double, convergence_window> sigma_sq_history{};
     double sigma_sq = 0.0;
     bool has_estimate = false;
     bool debug = params_.verbose;
 
     for (int i = 0; i < params_.sv_max_iter; ++i) {
-        // Normalize
-        double en = mlx_norm2(eigen);
-        if (en < 1e-14) {
-            if (debug)
-                printf("  SV: iter %d norm near zero (%.2e), stopping\n", i, en);
+        s_.singular_value_iterations = i + 1;
+        // eigen is normalized on entry. Compute the next power iterate and
+        // evaluate its Rayleigh quotient and norm together, requiring one host
+        // synchronization per iteration instead of four separate reductions.
+        auto y = mat_ATx(eigen);
+        auto eigen_new = mat_Ax(y);
+        auto sigma_sq_value = mx::sum(eigen * eigen_new);
+        auto eigen_new_norm_value = mx::linalg::norm(eigen_new);
+        mx::eval(sigma_sq_value, eigen_new_norm_value);
+        sigma_sq = mlx_scalar_as_double(sigma_sq_value);
+        eigen_norm = mlx_scalar_as_double(eigen_new_norm_value);
+
+        if (!is_finite(sigma_sq) || !is_finite(eigen_norm)) {
+            sigma_sq = std::numeric_limits<double>::quiet_NaN();
             break;
         }
-        eigen = eigen / mlx_scalar_like(en, eigen);
-
-        // y = A^T * eigen
-        auto y = mat_ATx(eigen);
-        double y_norm = mlx_norm2(y);
-        if (y_norm < 1e-14) {
+        if (eigen_norm < 1e-14) {
             double frobenius_norm = compute_frobenius_norm();
             if (debug) {
                 printf("  SV: start vector has no projection through A^T; "
@@ -2092,30 +2105,32 @@ double MlxPdlpSolver::mlx_estimate_max_singular_value() {
             }
             return frobenius_norm;
         }
-
-        // eigen_new = A * y
-        auto eigen_new = mat_Ax(y);
-
-        // sigma_sq = <eigen, eigen_new> (Rayleigh quotient)
-        sigma_sq = mlx_dot(eigen, eigen_new);
         has_estimate = true;
 
-        // residual = eigen_new - sigma_sq * eigen
-        auto residual_vec =
-            eigen_new - mlx_scalar_like(sigma_sq, eigen) * eigen;
-        double rn = mlx_norm2(residual_vec);
+        double relative_sigma_sq_change = std::numeric_limits<double>::infinity();
+        if (i >= convergence_window) {
+            const double previous_sigma_sq =
+                sigma_sq_history[static_cast<size_t>(i % convergence_window)];
+            relative_sigma_sq_change =
+                std::fabs(sigma_sq - previous_sigma_sq) /
+                std::max(std::fabs(sigma_sq), 1e-30);
+        }
+        sigma_sq_history[static_cast<size_t>(i % convergence_window)] = sigma_sq;
 
         if (debug && (i < 5 || i % 100 == 0)) {
-            printf("  SV iter %3d: en=%.4f sigma_sq=%.6f sigma=%.6f residual=%.2e\n", i, en,
-                   sigma_sq, std::sqrt(std::fabs(sigma_sq)), rn);
+            printf("  SV iter %3d: sigma_sq=%.6f sigma=%.6f rel_change_%d=%.2e\n",
+                   i, sigma_sq, std::sqrt(std::fabs(sigma_sq)),
+                   convergence_window, relative_sigma_sq_change);
         }
-        eigen = eigen_new;
 
-        if (rn < params_.sv_tol) {
-            if (debug)
-                printf("  SV: converged at iter %d\n", i);
+        if (relative_sigma_sq_change < params_.sv_tol) {
+            if (debug) {
+                printf("  SV: converged at iter %d (relative sigma^2 change %.2e)\n",
+                       i, relative_sigma_sq_change);
+            }
             break;
         }
+        eigen = eigen_new / mlx_scalar_like(eigen_norm, eigen_new);
     }
 
     if (!has_estimate || !is_finite(sigma_sq)) {

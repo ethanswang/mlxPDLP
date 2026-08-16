@@ -167,7 +167,8 @@ static void test_default_parameters() {
     mlxpdlp_set_default_parameters(&params);
     CHECK(params.l_inf_ruiz_iterations == 10, "wrong l_inf_ruiz_iterations");
     CHECK(params.termination_evaluation_frequency == 200, "wrong eval_freq");
-    CHECK(params.sv_max_iter == 5000, "wrong sv_max_iter");
+    CHECK(params.sv_max_iter == 200, "wrong sv_max_iter");
+    CHECK(params.sv_tol == 1e-4, "wrong sv_tol");
     CHECK(params.reflection_coefficient == 1.0, "wrong reflection_coeff");
     CHECK(params.restart_params.artificial_restart_threshold == 0.36, "wrong restart threshold");
     CHECK(params.restart_params.k_p == 0.99, "wrong k_p");
@@ -706,6 +707,66 @@ static void test_singular_value_nullspace_start() {
                 "power method should recover the nonzero singular value");
     PASS();
 test_cleanup:;
+}
+
+static void test_power_method_stops_on_relative_spectral_change() {
+    TEST("power method stops on relative spectral change");
+
+    constexpr int size = 256;
+    constexpr int entries_per_row = 4;
+    std::vector<int> row_ptr(static_cast<size_t>(size) + 1);
+    std::vector<int> col_ind;
+    std::vector<double> values;
+    col_ind.reserve(static_cast<size_t>(size) * entries_per_row);
+    values.reserve(static_cast<size_t>(size) * entries_per_row);
+    for (int row = 0; row < size; ++row) {
+        row_ptr[static_cast<size_t>(row)] = static_cast<int>(col_ind.size());
+        for (int offset = 0; offset < entries_per_row; ++offset) {
+            col_ind.push_back((row + offset) % size);
+            values.push_back(1.0);
+        }
+    }
+    row_ptr.back() = static_cast<int>(col_ind.size());
+
+    std::vector<double> objective(static_cast<size_t>(size), 0.0);
+    std::vector<double> variable_lower(static_cast<size_t>(size), 0.0);
+    std::vector<double> variable_upper(static_cast<size_t>(size), INFINITY);
+    std::vector<double> constraint_lower(static_cast<size_t>(size), -INFINITY);
+    std::vector<double> constraint_upper(static_cast<size_t>(size), INFINITY);
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.feasibility_polishing = false;
+    params.host_double_polishing = false;
+    // One iteration beyond the new default keeps the old absolute-residual
+    // implementation bounded while proving the relative criterion fires.
+    params.sv_max_iter = 201;
+    params.sv_tol = 1e-4;
+    params.termination_evaluation_frequency = 2;
+    params.termination_criteria.iteration_limit = 0;
+    params.termination_criteria.time_sec_limit = 10.0;
+
+    mlxpdlp_result_t *result = nullptr;
+    MlxPdlpSolver solver(size, size, row_ptr.data(), col_ind.data(), values.data(),
+                         variable_lower.data(), variable_upper.data(),
+                         constraint_lower.data(), constraint_upper.data(),
+                         objective.data(), 0.0, &params, mx::Device::cpu);
+    result = solver.solve();
+    const double estimated_sigma = 0.998 / solver.state().step_size;
+
+    CHECK(solver.state().singular_value_iterations < params.sv_max_iter,
+          "relative sigma-squared test should stop before the cap");
+    CHECK_CLOSE(estimated_sigma, 1.0, 2e-3,
+                "early spectral estimate should retain step-size accuracy");
+
+    mlxpdlp_result_free(result);
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(result);
 }
 
 // ---------------------------------------------------------------------------
@@ -1929,6 +1990,7 @@ int main() {
     test_repeat_solve();
     test_solver_rejects_second_solve();
     test_singular_value_nullspace_start();
+    test_power_method_stops_on_relative_spectral_change();
     test_duplicate_csr_entries();
 #if defined(__APPLE__)
     test_large_cpu_problem_uses_sparse_backend();

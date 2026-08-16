@@ -143,7 +143,8 @@ static void bind_parameters(nb::module_ &m) {
                 &pdhg_parameters_t::termination_evaluation_frequency)
         .def_rw("sv_max_iter", &pdhg_parameters_t::sv_max_iter,
                 "Power-method singular-value estimation budget.")
-        .def_rw("sv_tol", &pdhg_parameters_t::sv_tol)
+        .def_rw("sv_tol", &pdhg_parameters_t::sv_tol,
+                "Relative sigma-squared change tolerance over ten iterations.")
         .def_prop_rw(
             "termination_criteria",
             [](pdhg_parameters_t &p) -> termination_criteria_t & {

@@ -454,7 +454,7 @@ scaled problem.
 | `termination_evaluation_frequency` | `200` |
 | `reflection_coefficient` | `1.0` |
 | `metal_fused_kernels` | `true` |
-| `sv_max_iter` | `5000` |
+| `sv_max_iter` | `200` |
 | `sv_tol` | `1e-4` |
 | `eps_optimal_relative` | `1e-4` |
 | `eps_feasible_relative` | `1e-4` |
@@ -582,18 +582,19 @@ Constraint bounds and variable bounds are multiplied by
 ## Spectral norm and initial step size
 
 `mlx_estimate_max_singular_value()` applies a deterministic power method to
-`A Aᵀ`, starting from `ones(m)`:
+`A Aᵀ`, starting from a fixed-seed random-normal vector:
 
 ```text
 eigen       = eigen / norm(eigen)
 y           = Aᵀ eigen
 eigen_next  = A y
 sigma_sq    = dot(eigen, eigen_next)
-residual    = eigen_next - sigma_sq * eigen
 ```
 
-Iteration stops when the residual norm falls below `sv_tol` or
-`sv_max_iter` is reached. The solver then uses:
+The Rayleigh quotient and `norm(eigen_next)` are evaluated in one batch, so
+each iteration requires one host synchronization. Iteration stops when the
+relative change in `sigma_sq` over a 10-iteration window falls below `sv_tol`,
+or when `sv_max_iter` is reached. The solver then uses:
 
 ```text
 step_size = 0.998 / sqrt(abs(sigma_sq))

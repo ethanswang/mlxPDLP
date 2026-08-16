@@ -113,7 +113,7 @@ struct Options {
     int host_double_polishing_iteration_limit = 50000;
     double host_double_polishing_time_limit_seconds = 30.0;
     int evaluation_frequency = 200;
-    int singular_value_iterations = 5000;
+    int singular_value_iterations = 200;
     int curtis_reid_iterations = 20;
     int restart_policy = 0;
     int jobs = 0;
@@ -417,7 +417,7 @@ void print_usage(const char *program) {
         "  --correction-iteration-limit N  Warm-start correction limit (default 200000)\n"
         "  --correction-time-limit SECONDS Warm-start correction limit (default 300)\n"
         "  --evaluation-frequency N    Termination cadence (default 200)\n"
-        "  --sv-max-iterations N       Power-method limit (default 5000)\n"
+        "  --sv-max-iterations N       Power-method limit (default 200)\n"
         "  --curtis-reid-iterations N  Curtis-Reid passes; 0 disables (default 20)\n"
         "  --restart-policy N        0=cuPDLPx PID weight restart (default),\n"
         "                             1=HPR-LP movement-ratio sigma update\n"
