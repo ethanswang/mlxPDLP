@@ -636,7 +636,6 @@ MlxPdlpSolver::MlxPdlpSolver(int num_vars, int num_cons, const int *csr_row_ptr,
     s_.y_init = mx::zeros({working_num_cons}, compute_dtype);
     s_.y_best = mx::zeros({working_num_cons}, compute_dtype);
     s_.Ax = mx::zeros({working_num_cons}, compute_dtype);
-    s_.primal_slack = mx::zeros({working_num_cons}, compute_dtype);
     s_.primal_res = mx::zeros({working_num_cons}, compute_dtype);
     s_.delta_y = mx::zeros({working_num_cons}, compute_dtype);
 
@@ -734,16 +733,10 @@ void MlxPdlpSolver::preprocess_bounds(const double *host_var_lb, const double *h
     const mx::Dtype compute_dtype =
         s_.cpu_double_precision_active ? mx::float64 : mx::float32;
 
-    auto make_finite_safe = [compute_dtype](const double *host, int size,
-                                            double default_val) -> mx::array {
-        std::vector<double> safe(size);
-        for (int i = 0; i < size; ++i) {
-            double v = host ? host[i] : default_val;
-            safe[i] = is_finite(v) ? v : 0.0;
-        }
-        return mlx_array_from_doubles(safe.data(), size, compute_dtype);
-    };
-
+    // Only the infinite-bound masks are cached. Finite-safe bound values are
+    // computed fresh where needed (dual objective and infeasibility rays)
+    // because the cached copies would go stale after Pock-Chambolle and
+    // bound/objective scaling.
     auto make_inf_mask = [compute_dtype](const double *host, int size,
                                          double inf_val) -> mx::array {
         std::vector<double> mask(size);
@@ -753,11 +746,6 @@ void MlxPdlpSolver::preprocess_bounds(const double *host_var_lb, const double *h
         }
         return mlx_array_from_doubles(mask.data(), size, compute_dtype);
     };
-
-    s_.var_lb_finite = make_finite_safe(host_var_lb, n, -inf());
-    s_.var_ub_finite = make_finite_safe(host_var_ub, n, inf());
-    s_.con_lb_finite = make_finite_safe(host_con_lb, m, -inf());
-    s_.con_ub_finite = make_finite_safe(host_con_ub, m, inf());
 
     s_.var_lb_inf_mask = make_inf_mask(host_var_lb, n, -inf());
     s_.var_ub_inf_mask = make_inf_mask(host_var_ub, n, inf());
@@ -876,20 +864,38 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
                     return static_cast<int64_t>(parsed);
                 }
             }
+            // Parse the Apple Silicon family generation from the device name
+            // ("Apple M1" through "Apple M5 Max"). The validated 8M-nonzero
+            // default corresponds to the M3; each newer generation reaches the
+            // SIMD-group crossover at smaller aggregate work. Unrecognized
+            // names keep the M3-tuned default.
             double family_factor = 1.0;
             try {
                 const auto &info = mx::gpu::device_info(0);
                 auto name_it = info.find("device_name");
                 if (name_it != info.end()) {
                     const std::string &name = std::get<std::string>(name_it->second);
-                    if (name.find("M4") != std::string::npos) {
-                        family_factor = 0.75;
-                    } else if (name.find("M3") != std::string::npos) {
-                        family_factor = 1.0;
-                    } else if (name.find("M2") != std::string::npos) {
-                        family_factor = 1.25;
-                    } else if (name.find("M1") != std::string::npos) {
-                        family_factor = 1.5;
+                    const size_t marker = name.find('M');
+                    if (marker != std::string::npos && marker + 1 < name.size() &&
+                        std::isdigit(static_cast<unsigned char>(name[marker + 1]))) {
+                        switch (name[marker + 1] - '0') {
+                        case 1:
+                            family_factor = 1.5;
+                            break;
+                        case 2:
+                            family_factor = 1.25;
+                            break;
+                        case 3:
+                            family_factor = 1.0;
+                            break;
+                        case 4:
+                            family_factor = 0.75;
+                            break;
+                        default:
+                            // M5 and newer.
+                            family_factor = 0.5;
+                            break;
+                        }
                     }
                 }
             } catch (...) {
@@ -2630,6 +2636,18 @@ void MlxPdlpSolver::mlx_primal_feasibility_polish() {
         return;
     }
 
+    // The polish phases share the solve-level wall-clock budget: cuPDLPx's
+    // check_feas_polishing_termination_criteria measures total_time_sec from
+    // the ORIGINAL state's start time, so main loop plus both polish phases
+    // together stay within time_sec_limit instead of each phase receiving its
+    // own full copy of the budget.
+    if (elapsed_seconds(s_.start_time) >= criteria.time_sec_limit) {
+        if (params_.verbose) {
+            printf("  primal polish: skipped, shared time budget exhausted\n");
+        }
+        return;
+    }
+
     const auto polish_start = SteadyClock::now();
     const auto original_obj = s_.obj;
     const auto baseline_x = s_.x_pdhg;
@@ -2705,7 +2723,7 @@ void MlxPdlpSolver::mlx_primal_feasibility_polish() {
     bool do_restart = false;
     const int eval_freq = params_.termination_evaluation_frequency;
     while (s_.total_count < criteria.iteration_limit &&
-           elapsed_seconds(polish_start) < criteria.time_sec_limit) {
+           elapsed_seconds(s_.start_time) < criteria.time_sec_limit) {
         mlx_compute_next_primal(1, true);
         mlx_compute_next_dual(1, true);
         if (do_restart) {
@@ -2863,6 +2881,17 @@ void MlxPdlpSolver::mlx_dual_feasibility_polish() {
         return;
     }
 
+    // Share the solve-level wall-clock budget exactly like the primal polish
+    // phase: cuPDLPx measures polish termination time from the ORIGINAL
+    // state's start, so the main loop and both polish phases together stay
+    // within time_sec_limit.
+    if (elapsed_seconds(s_.start_time) >= criteria.time_sec_limit) {
+        if (params_.verbose) {
+            printf("  dual polish: skipped, shared time budget exhausted\n");
+        }
+        return;
+    }
+
     const auto polish_start = SteadyClock::now();
     const auto original_var_lb = s_.var_lb;
     const auto original_var_ub = s_.var_ub;
@@ -2959,7 +2988,7 @@ void MlxPdlpSolver::mlx_dual_feasibility_polish() {
     bool do_restart = false;
     const int eval_freq = params_.termination_evaluation_frequency;
     while (s_.total_count < criteria.iteration_limit &&
-           elapsed_seconds(polish_start) < criteria.time_sec_limit) {
+           elapsed_seconds(s_.start_time) < criteria.time_sec_limit) {
         mlx_compute_next_primal(1, true);
         mlx_compute_next_dual(1, true);
         if (do_restart) {

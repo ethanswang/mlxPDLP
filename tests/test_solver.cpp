@@ -1033,6 +1033,54 @@ test_cleanup:
     mlxpdlp_result_free(polished);
 }
 
+static void test_polish_shares_solve_time_budget() {
+    TEST("polishing phases share the solve-level time budget");
+
+    // With a zero time budget the main loop reaches TIME_LIMIT on its first
+    // termination check. The polish phases must then be skipped entirely
+    // (cuPDLPx measures polish time from the original solve start), rather
+    // than each receiving its own full copy of the limit.
+    int row_ptr[] = {0, 2, 4};
+    int col_ind[] = {0, 1, 0, 1};
+    double vals[] = {10000.0, 1.0, 0.01, 2.0};
+    double obj[] = {0.01, 100.0};
+    double con_lb[] = {10001.0, 2.01};
+    double con_ub[] = {10001.0, 2.01};
+    double var_lb[] = {0.0, 0.0};
+    double var_ub[] = {INFINITY, INFINITY};
+    mlxpdlp_result_t *result = nullptr;
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.feasibility_polishing = true;
+    params.termination_evaluation_frequency = 2;
+    params.termination_criteria.eps_optimal_relative = 0.0;
+    params.termination_criteria.eps_feasible_relative = 0.0;
+    params.termination_criteria.eps_feas_polish_relative = 1e-6;
+    params.termination_criteria.iteration_limit = 100000;
+    params.termination_criteria.time_sec_limit = 0.0;
+
+    MlxPdlpSolver solver(2, 2, row_ptr, col_ind, vals, var_lb, var_ub, con_lb, con_ub,
+                         obj, 0.0, &params);
+    result = solver.solve();
+
+    CHECK(result->termination_reason == TERMINATION_REASON_TIME_LIMIT,
+          "exhausted budget should terminate with TIME_LIMIT");
+    CHECK(result->feasibility_iteration == 0,
+          "exhausted budget must skip both polish phases");
+    CHECK(result->feasibility_polishing_time == 0.0,
+          "skipped polish phases should report zero polishing time");
+
+    mlxpdlp_result_free(result);
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(result);
+}
+
 static void test_host_double_polishing_is_safeguarded() {
     TEST("host-double polishing is bounded and safeguarded");
 
@@ -1998,6 +2046,7 @@ int main() {
     test_reported_residuals_use_original_scaling();
     test_zero_norm_residual_normalization();
     test_feasibility_polishing_is_safeguarded();
+    test_polish_shares_solve_time_budget();
     test_host_double_polishing_is_safeguarded();
     test_host_double_repairs_primal_without_changing_objective();
     test_fp64_cpu_bypasses_host_double_handoff();

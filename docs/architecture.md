@@ -439,18 +439,22 @@ the backend may dispatch multiple reduction kernels inside that evaluation.
 
 ## Bounds and finite-safe arrays
 
-`preprocess_bounds()` constructs:
+`preprocess_bounds()` constructs the four backend-dtype masks that mark
+infinite lower and upper bounds. These masks are used by the
+infeasibility-ray helper (recession-cone sign conditions) and by warm-start
+certificate construction.
 
-- `var_lb_finite`, `var_ub_finite`, `con_lb_finite`, and
-  `con_ub_finite`, where infinities are replaced by zero;
-- four backend-dtype masks marking infinite lower and upper bounds.
-
-Finite-safe values prevent expressions such as `∞ × 0` from producing NaN.
-The masks are used by the implemented infeasibility-ray helper.
+Finite-safe bound values (infinities replaced by zero, so expressions such as
+`∞ × 0` cannot produce NaN) are computed fresh wherever they are needed — the
+dual objective in `mlx_compute_residual()` and the separation gap in
+`mlx_compute_infeasibility_information()` — rather than cached, because
+cached copies would go stale after Pock-Chambolle and bound/objective
+scaling.
 
 After Ruiz scaling changes the bounds, `solve()` copies the scaled bounds to
-the host and reruns `preprocess_bounds()` so these derived arrays reflect the
-scaled problem.
+the host and reruns `preprocess_bounds()` so the masks reflect the scaled
+problem (finiteness is preserved by every preconditioner, so only the
+post-Ruiz refresh is required).
 
 ## Default parameters
 
@@ -486,11 +490,15 @@ scaled problem.
 | `matrix_zero_tol` | `1e-9` |
 
 Feasibility polishing and host-double correction are guarded, opt-in solve
-phases. Host FP64 correction can reconstruct a certificate at fixed primal,
-apply an objective-neutral descent step to a primal-only blocker, and continue
-joint PDHG. Every route retains the incumbent unless the complete
-primal/dual/gap KKT merit improves. L∞ optimality remains available through
-`optimality_norm`.
+phases. Both polish phases share the solve-level `time_sec_limit` wall-clock
+budget: as in cuPDLPx's `check_feas_polishing_termination_criteria`, their
+elapsed time is measured from the original solve start, so the main loop and
+the two polish phases together stay within the requested limit instead of
+each phase receiving its own full copy. Host FP64 correction can reconstruct
+a certificate at fixed primal, apply an objective-neutral descent step to a
+primal-only blocker, and continue joint PDHG. Every route retains the
+incumbent unless the complete primal/dual/gap KKT merit improves. L∞
+optimality remains available through `optimality_norm`.
 
 ## Presolve, postsolve, and warm starts
 

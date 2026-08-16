@@ -44,6 +44,19 @@ and the project intends to follow
 - Metal iteration performance: the fixed-work 16K-128K acceleration sweep
   improved from 1.2x-2.0x to 3.1x-6.5x versus CPU FP64 on an M3 Max by
   fusing iteration kernels and batching evaluations.
+- The SpMV SIMD-group dispatch threshold now parses the Apple Silicon family
+  generation from the device name instead of matching a fixed M1-M4 list,
+  covering M5 and newer families automatically.
+- Feasibility polishing phases now share the solve-level `time_sec_limit`
+  budget: as in cuPDLPx's `check_feas_polishing_termination_criteria`, polish
+  elapsed time is measured from the original solve start, so the main loop
+  and both polish phases together stay within the requested limit instead of
+  each phase receiving its own full copy (up to 3x the limit).
+- Removed dead solver state: the cached finite-safe bound arrays
+  (`var_lb_finite`, `var_ub_finite`, `con_lb_finite`, `con_ub_finite`) and
+  the unused `primal_slack` buffer were written but never read; finite-safe
+  bound values are computed fresh where needed, and only the infinite-bound
+  masks are cached.
 
 - An approval-gated, one-shot `make` workflow that reuses a local MLX package
   when available or downloads, builds, and privately installs the CI-tested

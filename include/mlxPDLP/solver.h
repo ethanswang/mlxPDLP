@@ -184,9 +184,7 @@ struct MlxPdlpState {
           A(_mlx_empty_array()),
           AT(_mlx_empty_array()), var_lb(_mlx_empty_array()), var_ub(_mlx_empty_array()),
           con_lb(_mlx_empty_array()), con_ub(_mlx_empty_array()), obj(_mlx_empty_array()),
-          objective_constant(0.0), var_lb_finite(_mlx_empty_array()),
-          var_ub_finite(_mlx_empty_array()), con_lb_finite(_mlx_empty_array()),
-          con_ub_finite(_mlx_empty_array()), var_lb_inf_mask(_mlx_empty_array()),
+          objective_constant(0.0), var_lb_inf_mask(_mlx_empty_array()),
           var_ub_inf_mask(_mlx_empty_array()), con_lb_inf_mask(_mlx_empty_array()),
           con_ub_inf_mask(_mlx_empty_array()), var_rescale(_mlx_empty_array()),
           con_rescale(_mlx_empty_array()), con_bound_rescale(1.0), obj_vec_rescale(1.0),
@@ -194,7 +192,7 @@ struct MlxPdlpState {
           x_init(_mlx_empty_array()), x_best(_mlx_empty_array()), ATy(_mlx_empty_array()),
           y_cur(_mlx_empty_array()), y_pdhg(_mlx_empty_array()), y_ref(_mlx_empty_array()),
           y_init(_mlx_empty_array()), y_best(_mlx_empty_array()), Ax(_mlx_empty_array()),
-          primal_slack(_mlx_empty_array()), dual_slack(_mlx_empty_array()),
+          dual_slack(_mlx_empty_array()),
           dual_slack_best(_mlx_empty_array()),
           primal_res(_mlx_empty_array()), dual_res(_mlx_empty_array()), delta_x(_mlx_empty_array()),
           delta_y(_mlx_empty_array()), step_size(1.0), primal_weight(1.0), step_size_primal(1.0),
@@ -247,12 +245,6 @@ struct MlxPdlpState {
     mx::array obj;    // [n] objective coefficients
     double objective_constant;
 
-    // Finite-safe bound sentinels (inf → 0 for multiplication contexts)
-    mx::array var_lb_finite; // [n]
-    mx::array var_ub_finite; // [n]
-    mx::array con_lb_finite; // [m]
-    mx::array con_ub_finite; // [m]
-
     // Boolean masks for bound conditions
     mx::array var_lb_inf_mask; // [n] true where var_lb == -inf
     mx::array var_ub_inf_mask; // [n] true where var_ub == +inf
@@ -282,7 +274,6 @@ struct MlxPdlpState {
     mx::array Ax;     // primal_product = A * x
 
     // Working arrays
-    mx::array primal_slack; // [m]
     mx::array dual_slack;   // [n]
     mx::array dual_slack_best; // [n], paired with x_best/y_best
     mx::array primal_res;   // [m]
