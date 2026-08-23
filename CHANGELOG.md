@@ -121,6 +121,11 @@ and the project intends to follow
 
 ### Fixed
 
+- Reserve half of the remaining bounded host-FP64 correction budget for joint
+  primal-dual continuation when fixed-primal certificate reconstruction does
+  not meet the full KKT target. This prevents a stationarity-only phase from
+  exhausting the cap at a feasible but suboptimal point; Netlib BOEING2 now
+  passes the opt-in `1e-5` original-model audit in its first presolved attempt.
 - Build managed MLX and mlxPDLP with one macOS deployment target, defaulting to
   MLX's minimum supported version 14.0, and invalidate stale managed archives
   instead of mixing deployment targets at link time.

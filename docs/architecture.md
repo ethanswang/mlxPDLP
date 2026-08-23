@@ -500,6 +500,14 @@ primal-only blocker, and continue joint PDHG. Every route retains the
 incumbent unless the complete primal/dual/gap KKT merit improves. L∞
 optimality remains available through `optimality_norm`.
 
+Fixed-primal dual reconstruction receives at most half of the remaining host
+iteration and time budgets unless it reaches the complete KKT target. The
+rest is reserved for joint FP64 PDHG, because stationarity can converge at a
+feasible but suboptimal primal point while its complementarity/objective gap
+cannot improve without moving `x`. This split remains inside the single
+configured host-correction cap, and best-certificate retention protects an
+already-good primal point from regression.
+
 ## Presolve, postsolve, and warm starts
 
 When `params.presolve` is true, the constructor runs PSLP on host data before

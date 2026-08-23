@@ -66,6 +66,27 @@ retired after its requested final attempt, and `psched3-3` remains deferred at
 the documented PSLP postsolve-certificate boundary while this smaller bridge
 is expanded.
 
+For the stronger normal-case accuracy check, `nug08-3rd` and `qap15` are the
+selected well-shaped LPfeas fixtures. On 2026-08-23, Metal FP32 plus the
+bounded host-FP64 correction passed both at an independent `1e-5`
+original-model audit (`5e-6` internal target):
+
+| Instance | Solve time | Max audited KKT |
+|---|---:|---:|
+| `nug08-3rd` | 0.17 s | `9.696e-8` |
+| `qap15` | 2.89 s | `8.960e-7` |
+
+Reproduce that focused gate with:
+
+```sh
+./build/mlxpdlp_lpfeas_benchmark \
+  --instance nug08-3rd \
+  --instance qap15 \
+  --tolerance 1e-5 \
+  --solver-tolerance 5e-6 \
+  --fail-on-validation
+```
+
 Run a fixed-work Metal benchmark with:
 
 ```sh

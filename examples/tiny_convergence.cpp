@@ -173,7 +173,7 @@ int main() {
 
         const auto metal = run_sweep(mx::Device::gpu);
         print_sweep("Metal FP32", metal);
-        if (!converged(metal, 1e-4)) {
+        if (!converged(metal, 1e-5)) {
             std::fprintf(stderr, "Metal FP32 convergence validation failed\n");
             return 1;
         }

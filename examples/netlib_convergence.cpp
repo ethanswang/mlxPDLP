@@ -152,7 +152,7 @@ bool converged(const std::vector<ConvergencePoint> &points) {
     if (!std::all_of(points.begin(), points.end(), finite))
         return false;
     const auto &last = points.back();
-    constexpr double tolerance = 1e-4;
+    constexpr double tolerance = 1e-5;
     return last.objective_relative_error <= tolerance &&
            last.relative_primal_residual <= tolerance && last.relative_dual_residual <= tolerance &&
            last.relative_duality_gap <= tolerance;

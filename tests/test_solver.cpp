@@ -1328,6 +1328,70 @@ test_cleanup:
     mlxpdlp_result_free(polished);
 }
 
+static void test_host_double_moves_feasible_suboptimal_primal() {
+    TEST("host-double continuation moves a feasible suboptimal primal point");
+
+    // minimize x0 subject to x0 + x1 = 1 and x >= 0. The supplied primal
+    // point is exactly feasible but suboptimal. Improving only its dual
+    // certificate cannot close the gap: the correction must retain budget for
+    // a joint primal-dual continuation that moves x toward [0, 1].
+    int row_ptr[] = {0, 2};
+    int col_ind[] = {0, 1};
+    double vals[] = {1.0, 1.0};
+    double obj[] = {1.0, 0.0};
+    double con_lb[] = {1.0};
+    double con_ub[] = {1.0};
+    double var_lb[] = {0.0, 0.0};
+    double var_ub[] = {INFINITY, INFINITY};
+    double primal_start[] = {0.5, 0.5};
+    double dual_start[] = {-10.0};
+    mlxpdlp_result_t *result = nullptr;
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.feasibility_polishing = false;
+    params.host_double_polishing = true;
+    params.host_double_early_handoff = false;
+    params.host_double_polishing_iteration_limit = 5000;
+    params.host_double_polishing_time_sec_limit = 2.0;
+    params.termination_evaluation_frequency = 10;
+    params.termination_criteria.eps_optimal_relative = 1e-6;
+    params.termination_criteria.eps_feasible_relative = 1e-6;
+    // Preserve the deliberately feasible, suboptimal checkpoint for the host
+    // correction so this test isolates its phase transition.
+    params.termination_criteria.iteration_limit = 0;
+    params.termination_criteria.time_sec_limit = 10.0;
+
+    MlxPdlpSolver solver(2, 1, row_ptr, col_ind, vals, var_lb, var_ub,
+                         con_lb, con_ub, obj, 0.0, &params, primal_start,
+                         dual_start, mx::Device::cpu);
+    result = solver.solve();
+
+    CHECK(result->host_double_polishing_iteration > 0,
+          "feasible suboptimal checkpoint should execute host correction");
+    CHECK(result->host_double_polishing_iteration <= 5000,
+          "host correction must respect its configured iteration cap");
+    CHECK(result->relative_primal_residual < 1e-6,
+          "joint continuation should preserve primal feasibility");
+    CHECK(result->relative_dual_residual < 1e-6,
+          "joint continuation should recover dual feasibility");
+    CHECK(result->relative_objective_gap < 1e-6,
+          "joint continuation should close the objective gap");
+    CHECK_CLOSE(result->primal_solution[0], 0.0, 1e-5,
+                "joint continuation should move x0 to its optimal bound");
+    CHECK_CLOSE(result->primal_solution[1], 1.0, 1e-5,
+                "joint continuation should preserve the equality at optimum");
+
+    mlxpdlp_result_free(result);
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(result);
+}
+
 // ---------------------------------------------------------------------------
 // Test 10: Warm starts are accepted in original coordinates and transformed
 // through preconditioning.
@@ -2051,6 +2115,7 @@ int main() {
     test_host_double_repairs_primal_without_changing_objective();
     test_fp64_cpu_bypasses_host_double_handoff();
     test_host_double_reconstructs_dual_without_moving_primal();
+    test_host_double_moves_feasible_suboptimal_primal();
     test_warm_start();
     test_complete_warm_certificate();
     test_warm_start_validation();

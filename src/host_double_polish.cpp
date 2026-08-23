@@ -655,7 +655,7 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
     const int evaluation_frequency =
         std::max(3, params_.termination_evaluation_frequency);
     int total_count = 0;
-    bool primal_preserving_checkpoint = false;
+    bool correction_target_reached = false;
 
     // A nearly optimal certificate can occasionally be paired with the last
     // few infeasible rows of an fp32 checkpoint (cont11 is a representative
@@ -838,7 +838,7 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
             if (best_metrics.relative_primal < target_feasibility &&
                 best_metrics.relative_dual < target_feasibility &&
                 best_metrics.relative_gap < target_optimality) {
-                primal_preserving_checkpoint = true;
+                correction_target_reached = true;
                 break;
             }
             if (nonimproving_iterations >= 8)
@@ -1076,7 +1076,11 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
             y_best = certificate_y;
             dual_slack_best = certificate_slack;
             best_changed = true;
-            primal_preserving_checkpoint = true;
+        }
+        if (best_metrics.relative_primal < target_feasibility &&
+            best_metrics.relative_dual < target_feasibility &&
+            best_metrics.relative_gap < target_optimality) {
+            correction_target_reached = true;
         }
 
         double certificate_step = params_.has_pock_chambolle_alpha
@@ -1084,13 +1088,29 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
                                       : step_size * step_size / 0.99;
         if (!std::isfinite(certificate_step) || certificate_step <= 0.0)
             certificate_step = 1e-6;
-        const int certificate_iteration_limit = iteration_limit;
+        // A fixed-primal certificate solve cannot remove an objective gap
+        // caused by a feasible but suboptimal x. Reserve half of the remaining
+        // iteration and wall-clock budgets for the joint continuation below.
+        // The complete KKT checkpoint still protects a genuinely optimal
+        // primal point from any regression when the joint phase starts.
+        const int remaining_iterations = iteration_limit - total_count;
+        const int certificate_budget =
+            remaining_iterations <= 1
+                ? remaining_iterations
+                : std::max(1, remaining_iterations / 2);
+        const int certificate_iteration_limit =
+            total_count + certificate_budget;
+        const double certificate_start_elapsed = seconds_since(polish_start);
+        const double certificate_time_limit =
+            certificate_start_elapsed +
+            0.5 * std::max(0.0, time_limit - certificate_start_elapsed);
         int certificate_count = 0;
         int certificate_backtracks = 0;
 
-        while (total_count < certificate_iteration_limit &&
+        while (!correction_target_reached &&
+               total_count < certificate_iteration_limit &&
                certificate_residual_norm_sq > 1e-30L &&
-               seconds_since(polish_start) < time_limit) {
+               seconds_since(polish_start) < certificate_time_limit) {
             const int block = std::min(evaluation_frequency,
                                        certificate_iteration_limit - total_count);
             certificate_block_start = certificate_y;
@@ -1102,7 +1122,8 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
             int completed = 0;
 
             for (; completed < block &&
-                   seconds_since(polish_start) < time_limit; ++completed) {
+                   seconds_since(polish_start) < certificate_time_limit;
+                 ++completed) {
                 rebuild_certificate_residual(certificate_momentum,
                                              certificate_work_slack);
                 multiply_a(certificate_residual, certificate_gradient);
@@ -1152,12 +1173,13 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
                 y_best = certificate_y;
                 dual_slack_best = certificate_slack;
                 best_changed = true;
-                primal_preserving_checkpoint = true;
             }
             if (best_metrics.relative_primal < target_feasibility &&
                 best_metrics.relative_dual < target_feasibility &&
-                best_metrics.relative_gap < target_optimality)
+                best_metrics.relative_gap < target_optimality) {
+                correction_target_reached = true;
                 break;
+            }
             if (completed < block || certificate_step < 1e-16)
                 break;
         }
@@ -1243,7 +1265,7 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
             std::sqrt(static_cast<double>(std::max(argument, 0.0L)));
     };
 
-    while (!primal_preserving_checkpoint && total_count < iteration_limit &&
+    while (!correction_target_reached && total_count < iteration_limit &&
            seconds_since(polish_start) < time_limit) {
         const int block = std::min(evaluation_frequency, iteration_limit - total_count);
         const int base_inner_count = inner_count;
