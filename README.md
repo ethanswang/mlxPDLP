@@ -19,8 +19,11 @@ or the original cuPDLPx source tree.
 > CPU execution is deliberately FP64 throughout the numerical solve. Metal
 > remains FP32 because Apple Silicon GPUs do not expose FP64 arithmetic.
 > This makes CPU the higher-accuracy fallback while preserving Metal's
-> throughput advantage — and it caps the portable Metal accuracy at the
-> practical `1e-4` tolerance (`5e-5` internal target).
+> throughput advantage. On well-conditioned LPs, FP32 Metal iteration plus
+> scaling, FP64 original-model auditing, and bounded host-FP64 correction can
+> reach an independently verified `1e-5` tolerance (`5e-6` internal target).
+> The portable cross-suite guarantee remains the practical `1e-4` tolerance
+> because ill-conditioned models can stagnate below that scale.
 
 ## Features
 
@@ -32,6 +35,7 @@ or the original cuPDLPx source tree.
 - Halpern PDHG with adaptive restart and primal-weight control
 - Infeasibility and unboundedness certificates with active termination
 - Ruiz, Pock-Chambolle, and bound/objective preconditioning
+- Bounded host-FP64 correction with original-model residual auditing
 - Optional PSLP presolve, early termination, and solution postsolve
 - Primal and dual warm starts in original problem coordinates
 - Public `double` API with FP64 CPU and FP32 Metal numerical backends
@@ -442,12 +446,13 @@ mlxPDLP 0.1.0, 2026-08-12):
 | `dlr1` | 1,735,470 x 9,142,907 / 18.4M | 470.3 s | 73.2 s | **6.4x** |
 
 > **Accuracy note:** Apple Silicon GPUs do not expose FP64 arithmetic,
-> so Metal runs in FP32. The practical supported accuracy is therefore a
-> `1e-4` tolerance (independently audited on the original model in
-> FP64), with a `5e-5` internal stopping target. FP32 PDHG is reliable
-> at low-to-moderate accuracy but stagnates on some ill-conditioned
-> models below that scale; use the CPU backend (FP64 throughout) when
-> tighter tolerances are required.
+> so Metal iteration runs in FP32. On normal, well-conditioned problems,
+> equilibration plus bounded host-FP64 correction has reached an independently
+> audited `1e-5` tolerance: NUG08-3RD and QAP15 measured maximum KKT errors of
+> `9.696e-8` and `8.960e-7`, respectively. This is a stronger opt-in target,
+> not a blanket FP32 guarantee. The portable supported accuracy remains
+> `1e-4` (`5e-5` internal target), and the CPU backend remains the FP64
+> reliability path for ill-conditioned models or tighter requirements.
 
 CPU runs the Accelerate sparse FP64 SpMV backend; Metal runs the CSR
 FP32 SpMV backend, so the advantage widens with model size (per
@@ -482,7 +487,10 @@ For the convergence-based LPfeas runner:
 ```sh
 ./build/mlxpdlp_lpfeas_benchmark \
   --instance qap15 \
-  --output-prefix benchmarks/results/qap15-metal
+  --tolerance 1e-5 \
+  --solver-tolerance 5e-6 \
+  --output-prefix benchmarks/results/qap15-metal-1e5 \
+  --fail-on-validation
 ```
 
 The same audited runner supports the 40-instance small-to-medium
