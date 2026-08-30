@@ -926,8 +926,14 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
 
     auto build_adaptive_work = [](const std::vector<int32_t> &row_ptr, int row_count) {
         constexpr int short_row_max_nonzeros = 64;
+        constexpr int medium_row_max_nonzeros = 4096;
+        constexpr int medium_row_marker = 1 << 30;
+        constexpr size_t simdgroup_width = 32;
         constexpr size_t threadgroup_width = 256;
+        constexpr size_t simdgroups_per_threadgroup =
+            threadgroup_width / simdgroup_width;
         std::vector<int32_t> short_rows;
+        std::vector<int32_t> medium_rows;
         std::vector<int32_t> long_rows;
         short_rows.reserve(static_cast<size_t>(row_count));
         for (int row = 0; row < row_count; ++row) {
@@ -935,21 +941,37 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
                                row_ptr[static_cast<size_t>(row)];
             if (length <= short_row_max_nonzeros) {
                 short_rows.push_back(row);
+            } else if (length <= medium_row_max_nonzeros) {
+                medium_rows.push_back(row);
             } else {
                 long_rows.push_back(row);
             }
         }
 
         AdaptiveWork work;
-        work.rows.reserve(short_rows.size() + long_rows.size());
+        work.rows.reserve(short_rows.size() + medium_rows.size() + long_rows.size());
         work.offsets.reserve((short_rows.size() + threadgroup_width - 1) /
                                  threadgroup_width +
+                             (medium_rows.size() + simdgroups_per_threadgroup - 1) /
+                                 simdgroups_per_threadgroup +
                              long_rows.size() + 1);
         for (size_t begin = 0; begin < short_rows.size(); begin += threadgroup_width) {
             const size_t end =
                 std::min(begin + threadgroup_width, short_rows.size());
             work.rows.insert(work.rows.end(), short_rows.begin() + begin,
                              short_rows.begin() + end);
+            work.offsets.push_back(static_cast<int32_t>(work.rows.size()));
+        }
+        for (size_t begin = 0; begin < medium_rows.size();
+             begin += simdgroups_per_threadgroup) {
+            const size_t end =
+                std::min(begin + simdgroups_per_threadgroup, medium_rows.size());
+            for (size_t index = begin; index < end; ++index) {
+                // A second negative range marks packs where each SIMD group
+                // cooperatively reduces one medium row. This keeps -row-1
+                // available for the full-threadgroup long-row reducer.
+                work.rows.push_back(-medium_row_marker - medium_rows[index] - 1);
+            }
             work.offsets.push_back(static_cast<int32_t>(work.rows.size()));
         }
         for (int32_t row : long_rows) {
@@ -1160,7 +1182,25 @@ mx::array MlxPdlpSolver::sparse_matvec(const mx::array &row_ptr, const mx::array
             int first_row = work_rows[descriptor_begin];
             threadgroup float partials[256];
 
-            if (first_row < 0) {
+            constexpr int medium_row_marker = 1073741824;
+            if (first_row < -medium_row_marker) {
+                uint simd_lane = local_thread & 31;
+                uint simd_group = local_thread >> 5;
+                int descriptor = descriptor_begin + int(simd_group);
+                if (descriptor < descriptor_end) {
+                    uint row = uint(-work_rows[descriptor] - medium_row_marker - 1);
+                    float total = 0.0f;
+                    int begin = row_starts[row];
+                    int end = row_starts[row + 1];
+                    for (int k = begin + int(simd_lane); k < end; k += 32) {
+                        total = fma(nonzeros[k], vector[column_indices[k]], total);
+                    }
+                    total = simd_sum(total);
+                    if (simd_lane == 0) {
+                        output[row] = total;
+                    }
+                }
+            } else if (first_row < 0) {
                 uint row = uint(-first_row - 1);
                 float partial = 0.0f;
                 int begin = row_starts[row];
@@ -1338,11 +1378,10 @@ inline void fused_dual_minor_update(
     DualInputPtr y_cur, DualInputPtr y_init,
     DualInputPtr con_lb, DualInputPtr con_ub,
     const constant float* scalars,
-    device float* y_cur_out, device float* y_ref_out) {
+    device float* y_cur_out) {
     FusedDualValues result = fused_dual_values(
         row, product, y_cur, y_init, con_lb, con_ub, scalars);
     y_cur_out[row] = result.y_cur;
-    y_ref_out[row] = result.y_ref;
 }
 )";
     return header.c_str();
@@ -1405,7 +1444,25 @@ std::string fused_body(const char *rs, const char *ci, const char *vals,
             int descriptor_end = $WO$[work_item + 1];
             int first_row = $WR$[descriptor_begin];
             threadgroup float partials[256];
-            if (first_row < 0) {
+            constexpr int medium_row_marker = 1073741824;
+            if (first_row < -medium_row_marker) {
+                uint simd_lane = local_thread & 31;
+                uint simd_group = local_thread >> 5;
+                int descriptor = descriptor_begin + int(simd_group);
+                if (descriptor < descriptor_end) {
+                    uint row = uint(-$WR$[descriptor] - medium_row_marker - 1);
+                    float acc = 0.0f;
+                    int begin = $RS$[row];
+                    int end = $RS$[row + 1];
+                    for (int k = begin + int(simd_lane); k < end; k += 32) {
+                        acc = fma($VALS$[k], $VEC$[$CI$[k]], acc);
+                    }
+                    acc = simd_sum(acc);
+                    if (simd_lane == 0) {
+                        $UPD$
+                    }
+                }
+            } else if (first_row < 0) {
                 uint row = uint(-first_row - 1);
                 float partial = 0.0f;
                 int begin = $RS$[row];
@@ -1471,10 +1528,10 @@ const std::string dual_major_update_partials =
     "y_cur_out, y_ref_out, y_pdhg_out);";
 const std::string dual_minor_update_acc =
     "fused_dual_minor_update(row, acc, y_cur, y_init, con_lb, con_ub, scalars, "
-    "y_cur_out, y_ref_out);";
+    "y_cur_out);";
 const std::string dual_minor_update_partials =
     "fused_dual_minor_update(row, partials[0], y_cur, y_init, con_lb, con_ub, scalars, "
-    "y_cur_out, y_ref_out);";
+    "y_cur_out);";
 
 struct FusedKernelVariants {
     mx::fast::CustomKernelFunction major;
@@ -1517,7 +1574,7 @@ FusedKernelVariants make_dual_fused_kernels(
                        dual_major_update_partials),
             fused_step_header()),
         mx::fast::metal_kernel(
-            base_name + "_minor", input_names, {"y_cur_out", "y_ref_out"},
+            base_name + "_minor", input_names, {"y_cur_out"},
             fused_body(row_starts, column_indices, values, work_offsets,
                        work_rows, vector, strategy, dual_minor_update_acc,
                        dual_minor_update_partials),
@@ -1656,8 +1713,8 @@ std::vector<mx::array> MlxPdlpSolver::fused_dual_step(
             {mx::float32, mx::float32, mx::float32}, {grid_size, 1, 1},
             {threadgroup_width, 1, 1}, {}, std::nullopt, false, s_.stream);
     }
-    return kernels->minor(inputs, {{s_.m}, {s_.m}},
-                          {mx::float32, mx::float32}, {grid_size, 1, 1},
+    return kernels->minor(inputs, {{s_.m}},
+                          {mx::float32}, {grid_size, 1, 1},
                           {threadgroup_width, 1, 1}, {}, std::nullopt, false,
                           s_.stream);
 }
@@ -1666,14 +1723,14 @@ int MlxPdlpSolver::fused_eval_batch_size() const {
     if (!params_.metal_fused_kernels || !s_.sparse_metal_active) {
         return 1;
     }
-    // Each fused minor iteration materializes (2n + 2m) floats plus a
+    // Each fused minor iteration materializes (2n + m) floats plus a
     // 3-float scalar block; major iterations add (2n + m) snapshot floats.
     // Bound the lazy batch graph to a fixed intermediate footprint so large
     // problems do not accumulate hundreds of iteration outputs in memory.
-    constexpr double target_bytes = 64.0 * 1024.0 * 1024.0;
+    constexpr double target_bytes = 256.0 * 1024.0 * 1024.0;
     constexpr int max_batch = 16;
     const double per_iteration_bytes =
-        static_cast<double>(2LL * s_.n + 2LL * s_.m) * sizeof(float);
+        static_cast<double>(2LL * s_.n + s_.m) * sizeof(float);
     if (per_iteration_bytes <= 0.0) {
         return 1;
     }
@@ -2467,8 +2524,8 @@ void MlxPdlpSolver::mlx_compute_next_dual(int k_offset, bool is_major,
         auto scalars = mlx_array_from_doubles(scalars_host, 3, mx::float32);
         auto out = fused_dual_step(scalars, is_major);
         s_.y_cur = out[0];
-        s_.y_ref = out[1];
         if (is_major) {
+            s_.y_ref = out[1];
             s_.y_pdhg = out[2];
         }
         if (eval_now) {
@@ -2476,7 +2533,7 @@ void MlxPdlpSolver::mlx_compute_next_dual(int k_offset, bool is_major,
                 mx::eval(s_.x_cur, s_.x_ref, s_.x_pdhg, s_.dual_slack, s_.y_cur,
                          s_.y_ref, s_.y_pdhg);
             } else {
-                mx::eval(s_.x_cur, s_.x_ref, s_.y_cur, s_.y_ref);
+                mx::eval(s_.x_cur, s_.x_ref, s_.y_cur);
             }
         }
         return;

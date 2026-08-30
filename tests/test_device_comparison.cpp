@@ -341,19 +341,30 @@ bool sparse_fused_unfused_match() {
     // The fused and unfused Metal iteration paths must produce equivalent
     // trajectories. With the default reflection coefficient both paths execute
     // identical fp32 arithmetic, so a tight elementwise tolerance is possible.
-    // The problem mixes a 2048-entry A^T row with short rows so both the
-    // adaptive and scalar-row fused kernels run in the same solve.
-    constexpr int size = 2048;
+    // A^T contains one 8192-entry long row, medium rows at the 65- and
+    // 4096-entry boundaries, and short rows. This exercises every adaptive
+    // work descriptor in the same dispatch while A uses the scalar-row kernel.
+    constexpr int size = 8192;
+    constexpr int medium_min_entries = 65;
+    constexpr int medium_max_entries = 4096;
     std::vector<int> row_ptr(static_cast<size_t>(size) + 1);
     std::vector<int> col_ind;
     std::vector<double> values;
-    col_ind.reserve(2 * size - 1);
-    values.reserve(2 * size - 1);
+    col_ind.reserve(2 * size + medium_min_entries + medium_max_entries);
+    values.reserve(2 * size + medium_min_entries + medium_max_entries);
     for (int row = 0; row < size; ++row) {
         row_ptr[static_cast<size_t>(row)] = static_cast<int>(col_ind.size());
         col_ind.push_back(0);
         values.push_back(1.0);
-        if (row > 0) {
+        if (row < medium_min_entries) {
+            col_ind.push_back(1);
+            values.push_back(1.0);
+        }
+        if (row < medium_max_entries) {
+            col_ind.push_back(2);
+            values.push_back(1.0);
+        }
+        if (row > 2) {
             col_ind.push_back(row);
             values.push_back(1.0);
         }
@@ -362,8 +373,16 @@ bool sparse_fused_unfused_match() {
 
     std::vector<double> objective(static_cast<size_t>(size), 1.0);
     objective[0] = size;
-    std::vector<double> constraint_bound(static_cast<size_t>(size), 2.0);
-    constraint_bound[0] = 1.0;
+    objective[1] = medium_min_entries;
+    objective[2] = medium_max_entries;
+    std::vector<double> constraint_bound(static_cast<size_t>(size), 1.0);
+    for (int row = 0; row < size; ++row) {
+        constraint_bound[static_cast<size_t>(row)] +=
+            row < medium_min_entries ? 1.0 : 0.0;
+        constraint_bound[static_cast<size_t>(row)] +=
+            row < medium_max_entries ? 1.0 : 0.0;
+        constraint_bound[static_cast<size_t>(row)] += row > 2 ? 1.0 : 0.0;
+    }
     std::vector<double> variable_lb(static_cast<size_t>(size), -INFINITY);
     std::vector<double> variable_ub(static_cast<size_t>(size), INFINITY);
     std::vector<double> primal_start(static_cast<size_t>(size), 1.0);
@@ -394,7 +413,15 @@ bool sparse_fused_unfused_match() {
                              constraint_bound.data(), constraint_bound.data(),
                              objective.data(), 0.0, &params, primal_start.data(),
                              dual_start.data(), mx::Device::gpu);
-        return solver.solve();
+        mlxpdlp_result_t *result = solver.solve();
+        if (solver.state().sparse_a_spmv_strategy !=
+                SparseMetalSpmvStrategy::scalar_rows ||
+            solver.state().sparse_at_spmv_strategy !=
+                SparseMetalSpmvStrategy::adaptive) {
+            destroy_result(result);
+            throw std::runtime_error("fixture did not select scalar/adaptive strategies");
+        }
+        return result;
     };
 
     mlxpdlp_result_t *fused = solve_once(true);

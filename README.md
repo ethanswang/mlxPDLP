@@ -442,8 +442,8 @@ mlxPDLP 0.1.0, 2026-08-30):
 
 | LPfeas instance | Size (rows x cols / nonzeros) | CPU FP64 | Metal FP32 | Speedup |
 |---|---:|---:|---:|---:|
-| `s82` | 87,878 x 1,690,631 / 7.0M | 200.4 s | 34.0 s | **5.9x** |
-| `dlr1` | 1,735,470 x 9,142,907 / 18.4M | 572.5 s | 39.9 s | **14.3x** |
+| `s82` | 87,878 x 1,690,631 / 7.0M | 200.4 s | 32.6 s | **6.1x** |
+| `dlr1` | 1,735,470 x 9,142,907 / 18.4M | 572.5 s | 26.8 s | **21.4x** |
 
 > **Accuracy note:** Apple Silicon GPUs do not expose FP64 arithmetic,
 > so Metal iteration runs in FP32. On normal, well-conditioned problems,
@@ -456,7 +456,7 @@ mlxPDLP 0.1.0, 2026-08-30):
 
 CPU runs the Accelerate sparse FP64 SpMV backend; Metal runs the CSR
 FP32 SpMV backend, so the advantage widens with model size (per
-iteration Metal is 5.9x faster on `s82` and 14.3x faster on `dlr1`,
+iteration Metal is 6.1x faster on `s82` and 21.4x faster on `dlr1`,
 with preconditioning overhead negligible on both backends). At the
 same `1e-4` audit, 42 of the 49 public LPfeas instances are verified
 on Metal FP32.
