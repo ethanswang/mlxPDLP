@@ -126,6 +126,9 @@ static void bind_parameters(nb::module_ &m) {
             new (self) pdhg_parameters_t();
             mlxpdlp_set_default_parameters(self);
         })
+        .def_rw("geometric_mean_iterations",
+                &pdhg_parameters_t::geometric_mean_iterations,
+                "Geometric-mean scaling passes (0 disables; default 12).")
         .def_rw("curtis_reid_iterations",
                 &pdhg_parameters_t::curtis_reid_iterations,
                 "Curtis-Reid scaling passes (0 disables).")
@@ -489,6 +492,9 @@ static void bind_solver(nb::module_ &m) {
                 check_bounds(dual_start, num_constraints, "dual_start");
                 check_bounds(reduced_cost_start, num_variables,
                              "reduced_cost_start");
+                if (parameters && parameters->geometric_mean_iterations < 0)
+                    throw nb::value_error(
+                        "geometric_mean_iterations must be non-negative");
                 const bool has_warm_start =
                     primal_start || dual_start || reduced_cost_start;
                 if (parameters && parameters->presolve && has_warm_start)

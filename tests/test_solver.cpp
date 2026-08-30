@@ -165,6 +165,8 @@ static void test_default_parameters() {
     TEST("default parameters");
     pdhg_parameters_t params;
     mlxpdlp_set_default_parameters(&params);
+    CHECK(params.geometric_mean_iterations == 12,
+          "wrong geometric_mean_iterations");
     CHECK(params.l_inf_ruiz_iterations == 10, "wrong l_inf_ruiz_iterations");
     CHECK(params.termination_evaluation_frequency == 200, "wrong eval_freq");
     CHECK(params.sv_max_iter == 200, "wrong sv_max_iter");
@@ -203,6 +205,66 @@ static void test_default_parameters() {
 #endif
     PASS();
 test_cleanup:;
+}
+
+// ---------------------------------------------------------------------------
+// Geometric-mean scaling must match the alternating Tomlin row/column update
+// added to cuPDLPx in #103.
+// ---------------------------------------------------------------------------
+
+static void test_geometric_mean_scaling() {
+    TEST("geometric-mean scaling factors");
+
+    int row_ptr[] = {0, 2, 4};
+    int col_ind[] = {0, 1, 0, 1};
+    double vals[] = {1.0, 100.0, 10.0, 1.0};
+    double obj[] = {1.0, 1.0};
+    double con_lb[] = {0.0, 0.0};
+    double con_ub[] = {1.0, 1.0};
+    double var_lb[] = {0.0, 0.0};
+    double var_ub[] = {INFINITY, INFINITY};
+
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.geometric_mean_iterations = 1;
+    params.curtis_reid_iterations = 0;
+    params.l_inf_ruiz_iterations = 0;
+    params.has_pock_chambolle_alpha = false;
+    params.bound_objective_rescaling = false;
+    params.sv_max_iter = 2;
+    params.termination_evaluation_frequency = 2;
+    params.termination_criteria.iteration_limit = 0;
+    params.termination_criteria.time_sec_limit = 10.0;
+
+    mlxpdlp_result_t *result = nullptr;
+    MlxPdlpSolver solver(2, 2, row_ptr, col_ind, vals, var_lb, var_ub, con_lb, con_ub, obj, 0.0,
+                         &params);
+    result = solver.solve();
+
+    const auto &state = solver.state();
+    const double *scaled = state.A.data<double>();
+    const double *row_scale = state.con_rescale.data<double>();
+    const double *column_scale = state.var_rescale.data<double>();
+    const double small = std::pow(10.0, -0.75);
+    const double large = std::pow(10.0, 0.75);
+
+    CHECK_CLOSE(row_scale[0], 10.0, 1e-12, "row scale 0");
+    CHECK_CLOSE(row_scale[1], std::sqrt(10.0), 1e-12, "row scale 1");
+    CHECK_CLOSE(column_scale[0], std::pow(10.0, -0.25), 1e-12, "column scale 0");
+    CHECK_CLOSE(column_scale[1], std::pow(10.0, 0.25), 1e-12, "column scale 1");
+    CHECK_CLOSE(scaled[0], small, 1e-12, "scaled A[0,0]");
+    CHECK_CLOSE(scaled[1], large, 1e-12, "scaled A[0,1]");
+    CHECK_CLOSE(scaled[2], large, 1e-12, "scaled A[1,0]");
+    CHECK_CLOSE(scaled[3], small, 1e-12, "scaled A[1,1]");
+
+    mlxpdlp_result_free(result);
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(result);
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +748,7 @@ static void test_singular_value_nullspace_start() {
     pdhg_parameters_t params;
     mlxpdlp_set_default_parameters(&params);
     params.verbose = false;
+    params.geometric_mean_iterations = 0;
     params.l_inf_ruiz_iterations = 0;
     params.has_pock_chambolle_alpha = false;
     params.bound_objective_rescaling = false;
@@ -831,6 +894,7 @@ static void test_large_cpu_problem_uses_sparse_backend() {
     mlxpdlp_set_default_parameters(&params);
     params.verbose = false;
     params.presolve = false;
+    params.geometric_mean_iterations = 0;
     params.curtis_reid_iterations = 0;
     params.l_inf_ruiz_iterations = 0;
     params.has_pock_chambolle_alpha = false;
@@ -872,7 +936,7 @@ test_cleanup:
 
 // ---------------------------------------------------------------------------
 // Residuals used for termination must be expressed in the original model's
-// coordinates after nonuniform Ruiz/Pock-Chambolle scaling.
+// coordinates after nonuniform geometric-mean/Ruiz/Pock-Chambolle scaling.
 // ---------------------------------------------------------------------------
 
 static void test_reported_residuals_use_original_scaling() {
@@ -1554,6 +1618,7 @@ static void test_cpu_scalar_arithmetic_preserves_fp64() {
     mlxpdlp_set_default_parameters(&params);
     params.verbose = false;
     params.presolve = false;
+    params.geometric_mean_iterations = 0;
     params.curtis_reid_iterations = 0;
     params.l_inf_ruiz_iterations = 0;
     params.has_pock_chambolle_alpha = false;
@@ -1600,6 +1665,7 @@ static void test_original_certificate_checks_variable_bounds() {
     mlxpdlp_set_default_parameters(&params);
     params.verbose = false;
     params.presolve = false;
+    params.geometric_mean_iterations = 0;
     params.curtis_reid_iterations = 0;
     params.l_inf_ruiz_iterations = 0;
     params.has_pock_chambolle_alpha = false;
@@ -1681,6 +1747,7 @@ static void test_original_certificate_demotes_all_failed_metrics() {
         mlxpdlp_set_default_parameters(&params);
         params.verbose = false;
         params.presolve = false;
+        params.geometric_mean_iterations = 0;
         params.curtis_reid_iterations = 0;
         params.l_inf_ruiz_iterations = 0;
         params.has_pock_chambolle_alpha = false;
@@ -1771,6 +1838,7 @@ static void test_host_double_polish_repairs_variable_bounds() {
     mlxpdlp_set_default_parameters(&params);
     params.verbose = false;
     params.presolve = false;
+    params.geometric_mean_iterations = 0;
     params.curtis_reid_iterations = 0;
     params.l_inf_ruiz_iterations = 0;
     params.has_pock_chambolle_alpha = false;
@@ -2092,6 +2160,7 @@ int main() {
     printf("========================================\n\n");
 
     test_default_parameters();
+    test_geometric_mean_scaling();
     test_simple_lp();
     test_medium_lp();
     test_simple_lp_tight();

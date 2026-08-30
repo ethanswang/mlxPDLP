@@ -114,6 +114,7 @@ struct Options {
     double host_double_polishing_time_limit_seconds = 30.0;
     int evaluation_frequency = 200;
     int singular_value_iterations = 200;
+    int geometric_mean_iterations = 12;
     int curtis_reid_iterations = 20;
     int restart_policy = 0;
     int jobs = 0;
@@ -420,6 +421,7 @@ void print_usage(const char *program) {
         "  --correction-time-limit SECONDS Warm-start correction limit (default 300)\n"
         "  --evaluation-frequency N    Termination cadence (default 200)\n"
         "  --sv-max-iterations N       Power-method limit (default 200)\n"
+        "  --geometric-mean-iterations N  Geometric-mean passes; 0 disables (default 12)\n"
         "  --curtis-reid-iterations N  Curtis-Reid passes; 0 disables (default 20)\n"
         "  --restart-policy N        0=cuPDLPx PID weight restart (default),\n"
         "                             1=HPR-LP movement-ratio sigma update\n"
@@ -508,6 +510,9 @@ Options parse_options(int argc, char **argv) {
         else if (argument == "--sv-max-iterations")
             options.singular_value_iterations =
                 parse_positive_int(take_value(), "singular value iterations");
+        else if (argument == "--geometric-mean-iterations")
+            options.geometric_mean_iterations =
+                parse_nonnegative_int(take_value(), "geometric-mean iterations");
         else if (argument == "--curtis-reid-iterations")
             options.curtis_reid_iterations =
                 parse_nonnegative_int(take_value(), "Curtis-Reid iterations");
@@ -878,6 +883,7 @@ RunRecord run_attempt(const ManifestEntry &entry, const fs::path &instance_path,
     parameters.presolve_finite_bound_tightening =
         options.presolve_finite_bound_tightening;
     parameters.presolve_primal_propagation = presolve && primal_propagation;
+    parameters.geometric_mean_iterations = options.geometric_mean_iterations;
     parameters.curtis_reid_iterations = curtis_reid_iterations;
     parameters.restart_policy = options.restart_policy;
     parameters.l_inf_ruiz_iterations = 10;
@@ -1586,6 +1592,8 @@ void write_json(const fs::path &path, const Options &options,
            << ", \"evaluation_frequency\": " << options.evaluation_frequency
            << ", \"sv_max_iterations\": " << options.singular_value_iterations
            << ", \"sparse_cpu_dense_element_threshold\": 16777216"
+           << ", \"geometric_mean_iterations\": "
+           << options.geometric_mean_iterations
            << ", \"curtis_reid_iterations\": " << options.curtis_reid_iterations
            << ", \"ruiz_iterations\": 10, "
               "\"pock_chambolle_alpha\": 1.0, "
@@ -1795,7 +1803,7 @@ int main(int argc, char **argv) {
                     entries.size() == 1 ? "" : "s");
         std::printf("Protocol: PSLP=%s/%s, singleton=%s, retry=%s/%s, warm-correct=%s/%d, "
                     "scale-retry=%s, audit-tol=%.1e, solver-tol=%.1e, time=%.0fs, "
-                    "eval=%d, sv-max=%d, CR=%d, polish=%s, host64=%s/%s/%d/%.0fs, "
+                    "eval=%d, sv-max=%d, geo=%d, CR=%d, polish=%s, host64=%s/%s/%d/%.0fs, "
                     "jobs=%d (%s/%s)\n",
                     options.presolve ? "on" : "off",
                     options.presolve_primal_propagation ? "propagate" : "safe",
@@ -1807,7 +1815,8 @@ int main(int argc, char **argv) {
                     options.retry_without_curtis_reid ? "on" : "off", options.tolerance,
                     effective_solver_tolerance(options),
                     options.time_limit_seconds, options.evaluation_frequency,
-                    options.singular_value_iterations, options.curtis_reid_iterations,
+                    options.singular_value_iterations, options.geometric_mean_iterations,
+                    options.curtis_reid_iterations,
                     options.feasibility_polishing ? "on" : "off",
                     options.host_double_polishing ? "on" : "off",
                     options.device == DeviceSelection::metal &&

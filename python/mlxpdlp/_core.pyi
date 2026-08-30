@@ -50,6 +50,7 @@ class NormType(enum.IntEnum):
 
 
 class Parameters:
+    geometric_mean_iterations: int
     curtis_reid_iterations: int
     l_inf_ruiz_iterations: int
     has_pock_chambolle_alpha: bool

@@ -10,6 +10,10 @@ and the project intends to follow
 
 ### Added
 
+- Tomlin geometric-mean matrix scaling, with 12 alternating row/column passes
+  enabled by default ahead of the existing Curtis-Reid, Ruiz, Pock-Chambolle,
+  and bound/objective preconditioners; the iteration count is exposed through
+  the C++ and Python parameter APIs and benchmark protocol.
 - Fused single-kernel Metal PDHG half-steps: CSR SpMV, scaled gradient step,
   bound projection, reflection, Halpern weighting, and major-iteration
   snapshots run in one dispatch per half-step across all three SpMV

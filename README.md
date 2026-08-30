@@ -10,11 +10,11 @@ PSLP presolver and MPS loader. It has no build or runtime dependency on CUDA
 or the original cuPDLPx source tree.
 
 > [!IMPORTANT]
-> Sparse Metal solves remain in CSR form through Ruiz/Pock-Chambolle
-> preprocessing, the power method, and PDHG iteration; they never allocate
-> dense `A` or `Aᵀ`. On macOS, sufficiently large sparse CPU problems use an
-> Accelerate SpMV primitive for the same reason. Small or dense problems retain
-> the dense MLX path.
+> Sparse Metal solves remain in CSR form through geometric-mean,
+> Ruiz/Pock-Chambolle preprocessing, the power method, and PDHG iteration;
+> they never allocate dense `A` or `Aᵀ`. On macOS, sufficiently large sparse
+> CPU problems use an Accelerate SpMV primitive for the same reason. Small or
+> dense problems retain the dense MLX path.
 >
 > CPU execution is deliberately FP64 throughout the numerical solve. Metal
 > remains FP32 because Apple Silicon GPUs do not expose FP64 arithmetic.
@@ -34,7 +34,7 @@ or the original cuPDLPx source tree.
 - Fused single-kernel Metal PDHG half-steps with batched lazy evaluation
 - Halpern PDHG with adaptive restart and primal-weight control
 - Infeasibility and unboundedness certificates with active termination
-- Ruiz, Pock-Chambolle, and bound/objective preconditioning
+- Geometric-mean, Ruiz, Pock-Chambolle, and bound/objective preconditioning
 - Bounded host-FP64 correction with original-model residual auditing
 - Optional PSLP presolve, early termination, and solution postsolve
 - Primal and dual warm starts in original problem coordinates

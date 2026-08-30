@@ -64,6 +64,7 @@ params.iteration_limit = 100000
 params.verbose = True
 params.presolve = True
 params.presolve_primal_propagation = False   # safe PSLP
+params.geometric_mean_iterations = 12        # 0 disables
 params.curtis_reid_iterations = 20
 params.termination_criteria.eps_optimal_relative = 1e-5   # fine-grained
 params.restart_params.k_p = 0.25

@@ -33,13 +33,13 @@ benchmarks/data/lpfeas/download.sh
   --output-prefix benchmarks/results/lpfeas-metal
 ```
 
-The default protocol uses Metal CSR in FP32, PSLP 0.0.8, L2 residuals, 10 Ruiz
-iterations, Pock-Chambolle alpha 1, bound/objective scaling, evaluation
-frequency 200, up to 5,000 power-method iterations, a 1,000-second
-per-attempt limit, and a practical `1e-4` convergence tolerance. The iteration
-limit is otherwise unlimited. Each worker warms the sparse Metal path and both
-adaptive row-kernel branches before the sweep clock starts; pass `--cold-start`
-to include first-use compilation.
+The default protocol uses Metal CSR in FP32, PSLP 0.0.8, L2 residuals,
+12 geometric-mean iterations, 10 Ruiz iterations, Pock-Chambolle alpha 1,
+bound/objective scaling, evaluation frequency 200, up to 5,000 power-method
+iterations, a 1,000-second per-attempt limit, and a practical `1e-4`
+convergence tolerance. The iteration limit is otherwise unlimited. Each worker
+warms the sparse Metal path and both adaptive row-kernel branches before the
+sweep clock starts; pass `--cold-start` to include first-use compilation.
 The internal stopping target defaults to `0.5 * tolerance` (`5e-5`) to leave
 rounding margin for the original-model audit; override it with
 `--solver-tolerance` when reproducing an exact trajectory.
@@ -134,8 +134,8 @@ valid reports for completed rows if it is interrupted.
 ## Staged LPfeas sweeps and result comparison
 
 `run_lpfeas_staged.sh` runs the 23 LPfeas instances that have recorded
-Metal/FP32 baselines in three serial stages, ordered by the last recorded
-wall time:
+pre-geometric Metal/FP32 baselines in three serial stages, ordered by the last
+recorded wall time:
 
 ```sh
 benchmarks/run_lpfeas_staged.sh easy    # ~22 min serial
@@ -143,10 +143,13 @@ benchmarks/run_lpfeas_staged.sh medium  # ~2 h serial
 benchmarks/run_lpfeas_staged.sh hard    # ~21 h serial
 ```
 
-Each instance runs with `--jobs 1` under the recorded protocol (1e-4 audit
-tolerance, 5e-5 solver target, 1,200 s per-attempt limit, Curtis-Reid 20,
-5,000 power-method iterations, host-double correction at 180 s / 300,000
-iterations) and writes `results/lpfeas-staged/<name>.csv/json`. Existing
+Each instance runs with `--jobs 1` under the current protocol (1e-4 audit
+tolerance, 5e-5 solver target, 1,200 s per-attempt limit, geometric-mean 12,
+Curtis-Reid 20, 5,000 power-method iterations, host-double correction at
+180 s / 300,000 iterations) and writes
+`results/lpfeas-staged-geomean12/<name>.csv/json`. Keeping the geometric-mean
+results in a distinct default directory prevents old `geo=0` files from being
+mistaken for completed `geo=12` runs. Existing
 results are skipped, so an interrupted stage resumes where it left off. The
 default 120 s cooldown between instances (`COOLDOWN_SECONDS`) matters:
 back-to-back serial sweeps thermally throttle laptop GPUs — degme measured
@@ -156,7 +159,8 @@ cannot be compared with recorded ones.
 Compare a staged run against the recorded baselines with:
 
 ```sh
-python3 benchmarks/compare_lpfeas_results.py results/lpfeas-staged
+python3 benchmarks/compare_lpfeas_results.py \
+  results/lpfeas-staged-geomean12
 ```
 
 It pairs each result with the newest recorded `lpfeas-<name>-metal-fp32.json`

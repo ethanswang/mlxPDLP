@@ -109,6 +109,7 @@ pdhg_parameters_t fixed_work_parameters(int iterations, bool metal_fused) {
     params.presolve = false;
     params.feasibility_polishing = false;
     params.host_double_polishing = false;
+    params.geometric_mean_iterations = 0;
     params.curtis_reid_iterations = 0;
     params.l_inf_ruiz_iterations = 0;
     params.has_pock_chambolle_alpha = false;

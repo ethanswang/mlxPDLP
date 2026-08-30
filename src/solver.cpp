@@ -210,6 +210,7 @@ static const char *termination_reason_str(termination_reason_t r) {
 // ---------------------------------------------------------------------------
 
 void mlxpdlp_set_default_parameters(pdhg_parameters_t *p) {
+    p->geometric_mean_iterations = 12;
     p->curtis_reid_iterations = 0;
     p->l_inf_ruiz_iterations = 10;
     p->has_pock_chambolle_alpha = true;
@@ -1829,6 +1830,107 @@ void MlxPdlpSolver::publish_sparse_rescaling() {
     mx::eval(s_.con_rescale, s_.var_rescale);
 }
 
+void MlxPdlpSolver::mlx_geometric_mean_scaling(int num_iters) {
+    if (num_iters <= 0 || s_.nnz == 0)
+        return;
+
+    // Match cuPDLPx's Tomlin geometric-mean preconditioner. Multipliers are
+    // computed against the current matrix without modifying it between
+    // alternating row and column updates; the converged diagonal scaling is
+    // applied once at the end.
+    constexpr double multiplier_max = 1e20;
+    constexpr double multiplier_min = 1.0 / multiplier_max;
+    const double infinity = std::numeric_limits<double>::infinity();
+
+    std::vector<double> row_multiplier(static_cast<size_t>(s_.m), 1.0);
+    std::vector<double> col_multiplier(static_cast<size_t>(s_.n), 1.0);
+    std::vector<double> row_min(static_cast<size_t>(s_.m));
+    std::vector<double> row_max(static_cast<size_t>(s_.m));
+    std::vector<double> col_min(static_cast<size_t>(s_.n));
+    std::vector<double> col_max(static_cast<size_t>(s_.n));
+
+    for (int iter = 0; iter < num_iters; ++iter) {
+        std::fill(row_min.begin(), row_min.end(), infinity);
+        std::fill(row_max.begin(), row_max.end(), 0.0);
+        for (int row = 0; row < s_.m; ++row) {
+            for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+                 k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+                const int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
+                const double scaled = std::abs(sparse_a_values_host_[static_cast<size_t>(k)]) *
+                                      col_multiplier[static_cast<size_t>(col)];
+                if (!(scaled > 0.0) || !std::isfinite(scaled))
+                    continue;
+                row_min[static_cast<size_t>(row)] =
+                    std::min(row_min[static_cast<size_t>(row)], scaled);
+                row_max[static_cast<size_t>(row)] =
+                    std::max(row_max[static_cast<size_t>(row)], scaled);
+            }
+            if (row_max[static_cast<size_t>(row)] > 0.0) {
+                const double updated = 1.0 / (std::sqrt(row_min[static_cast<size_t>(row)]) *
+                                              std::sqrt(row_max[static_cast<size_t>(row)]));
+                row_multiplier[static_cast<size_t>(row)] =
+                    std::clamp(updated, multiplier_min, multiplier_max);
+            }
+        }
+
+        std::fill(col_min.begin(), col_min.end(), infinity);
+        std::fill(col_max.begin(), col_max.end(), 0.0);
+        for (int row = 0; row < s_.m; ++row) {
+            for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+                 k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+                const int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
+                const double scaled = std::abs(sparse_a_values_host_[static_cast<size_t>(k)]) *
+                                      row_multiplier[static_cast<size_t>(row)];
+                if (!(scaled > 0.0) || !std::isfinite(scaled))
+                    continue;
+                col_min[static_cast<size_t>(col)] =
+                    std::min(col_min[static_cast<size_t>(col)], scaled);
+                col_max[static_cast<size_t>(col)] =
+                    std::max(col_max[static_cast<size_t>(col)], scaled);
+            }
+        }
+        for (int col = 0; col < s_.n; ++col) {
+            if (col_max[static_cast<size_t>(col)] > 0.0) {
+                const double updated = 1.0 / (std::sqrt(col_min[static_cast<size_t>(col)]) *
+                                              std::sqrt(col_max[static_cast<size_t>(col)]));
+                col_multiplier[static_cast<size_t>(col)] =
+                    std::clamp(updated, multiplier_min, multiplier_max);
+            }
+        }
+    }
+
+    std::vector<double> con_scale(static_cast<size_t>(s_.m), 1.0);
+    std::vector<double> var_scale(static_cast<size_t>(s_.n), 1.0);
+    for (int row = 0; row < s_.m; ++row)
+        con_scale[static_cast<size_t>(row)] = 1.0 / row_multiplier[static_cast<size_t>(row)];
+    for (int col = 0; col < s_.n; ++col)
+        var_scale[static_cast<size_t>(col)] = 1.0 / col_multiplier[static_cast<size_t>(col)];
+
+    if (sparse_metal_candidate_ || sparse_cpu_candidate_) {
+        apply_sparse_scaling(con_scale, var_scale);
+        publish_sparse_rescaling();
+        return;
+    }
+
+    auto con_scale_array = mlx_array_from_doubles(con_scale.data(), s_.m, s_.obj.dtype());
+    auto var_scale_array = mlx_array_from_doubles(var_scale.data(), s_.n, s_.obj.dtype());
+    auto inv_con_scale = 1.0 / con_scale_array;
+    auto inv_var_scale = 1.0 / var_scale_array;
+    s_.con_rescale = s_.con_rescale * con_scale_array;
+    s_.var_rescale = s_.var_rescale * var_scale_array;
+    s_.A = s_.A * mx::reshape(inv_con_scale, {s_.m, 1}) * mx::reshape(inv_var_scale, {1, s_.n});
+    s_.con_lb = s_.con_lb * inv_con_scale;
+    s_.con_ub = s_.con_ub * inv_con_scale;
+    s_.y_cur = s_.y_cur * con_scale_array;
+    s_.obj = s_.obj * inv_var_scale;
+    s_.var_lb = s_.var_lb * var_scale_array;
+    s_.var_ub = s_.var_ub * var_scale_array;
+    s_.x_cur = s_.x_cur * var_scale_array;
+    s_.AT = mx::transpose(s_.A);
+    mx::eval(s_.A, s_.AT, s_.con_lb, s_.con_ub, s_.y_cur, s_.obj, s_.var_lb, s_.var_ub, s_.x_cur,
+             s_.con_rescale, s_.var_rescale);
+}
+
 void MlxPdlpSolver::mlx_curtis_reid_scaling(int num_iters) {
     if (num_iters <= 0 || s_.nnz == 0)
         return;
@@ -2481,7 +2583,8 @@ void MlxPdlpSolver::mlx_compute_residual() {
                   reduced_cost_lb_adjusted);
     s_.dual_res = reduced_cost_raw - reduced_cost;
 
-    // Undo every preconditioner before taking norms. After Ruiz/Pock-Chambolle
+    // Undo every preconditioner before taking norms. After geometric-mean,
+    // Ruiz, and Pock-Chambolle scaling,
     // and the global bound/objective scaling, the working residuals are
     //
     //   r_p' = con_bound_rescale * diag(con_rescale)^-1 * r_p
@@ -3210,7 +3313,8 @@ void MlxPdlpSolver::mlx_compute_infeasibility_information() {
 
     // Finite-safe bound values must be derived from the CURRENT scaled bounds:
     // the cached finite-safe arrays are only refreshed after Ruiz and go stale
-    // after Pock-Chambolle and bound/objective scaling.
+    // after Pock-Chambolle and bound/objective scaling. Geometric-mean scaling
+    // runs before that refresh.
     auto con_lb_safe = mx::where(mx::isfinite(s_.con_lb), s_.con_lb, mx::zeros_like(s_.con_lb));
     auto con_ub_safe = mx::where(mx::isfinite(s_.con_ub), s_.con_ub, mx::zeros_like(s_.con_ub));
     auto var_lb_safe = mx::where(mx::isfinite(s_.var_lb), s_.var_lb, mx::zeros_like(s_.var_lb));
@@ -4177,8 +4281,11 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
     // denominator, so replacing zero by one halves the residual and also changes
     // the adaptive primal-weight trajectory on homogeneous models.
 
-    // Apply preconditioning (Curtis-Reid when requested, then Ruiz,
+    // Apply preconditioning (geometric mean, optional Curtis-Reid, then Ruiz,
     // Pock-Chambolle, and bound-objective scaling).
+    if (params_.geometric_mean_iterations > 0 && s_.nnz > 0) {
+        mlx_geometric_mean_scaling(params_.geometric_mean_iterations);
+    }
     if (params_.curtis_reid_iterations > 0 && s_.nnz > 0) {
         mlx_curtis_reid_scaling(params_.curtis_reid_iterations);
     }

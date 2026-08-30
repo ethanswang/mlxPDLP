@@ -49,6 +49,9 @@ def test_version():
 def test_parameters_defaults_and_roundtrip():
     p = mlxpdlp.Parameters()
     assert p.presolve is True
+    assert p.geometric_mean_iterations == 12
+    p.geometric_mean_iterations = 3
+    assert p.geometric_mean_iterations == 3
     p.tolerance = 1e-5
     assert p.termination_criteria.eps_optimal_relative == 1e-5
     assert p.termination_criteria.eps_feasible_relative == 1e-5
@@ -157,6 +160,10 @@ def test_invalid_inputs():
         # row_ptr must have m + 1 entries
         mlxpdlp.Solver(2, 2, row_ptr, col_ind, values, var_lb, var_ub,
                        con_lb, con_ub, obj)
+    parameters = mlxpdlp.Parameters()
+    parameters.geometric_mean_iterations = -1
+    with pytest.raises(ValueError, match="geometric_mean_iterations"):
+        solve_small(parameters=parameters)
 
 
 ADLITTLE = os.path.join(
@@ -171,7 +178,14 @@ def test_adlittle_mps():
             problem.num_nonzeros) == (97, 56, 383)
     assert problem.row_ptr.shape == (57,)
     assert problem.row_ptr[-1] == 383
-    result = mlxpdlp.solve_mps(ADLITTLE, device="cpu")
+    parameters = mlxpdlp.Parameters()
+    # The assertion below asks for 1e-5 objective accuracy, so request that
+    # tolerance explicitly instead of relying on the default 1e-4 solve to
+    # overshoot its stopping criteria on a particular scaling trajectory.
+    parameters.tolerance = 1e-5
+    parameters.verbose = False
+    result = mlxpdlp.solve_mps(
+        ADLITTLE, device="cpu", parameters=parameters)
     assert result.primal_objective_value == pytest.approx(
         225494.96316, rel=1e-5)
     assert result.termination_reason_name == "OPTIMAL"

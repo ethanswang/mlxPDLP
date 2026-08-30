@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run the LPfeas Metal/FP32 benchmark in three serial stages (easy, medium,
-# hard), mirroring the protocol recorded in benchmarks/results/lpfeas-*-metal-fp32.json.
+# hard) with the current geometric-mean protocol. The comparison tool pairs
+# these results with the recorded pre-geometric baselines.
 #
 # Usage:
 #   run_lpfeas_staged.sh <easy|medium|hard|all> [results_dir]
@@ -30,7 +31,7 @@ DATA_DIR=${LPFEAS_DATA_DIR:-$(cd "$SCRIPT_DIR/data/lpfeas" && pwd)}
 COOLDOWN=${COOLDOWN_SECONDS:-120}
 
 STAGE=${1:-}
-RESULTS_DIR=${2:-$SCRIPT_DIR/results/lpfeas-staged}
+RESULTS_DIR=${2:-$SCRIPT_DIR/results/lpfeas-staged-geomean12}
 if [ -z "$STAGE" ]; then
     echo "usage: $0 <easy|medium|hard|all> [results_dir]" >&2
     exit 2
@@ -68,7 +69,7 @@ run_one() {
         --time-limit 1200 --iteration-limit 1500000 \
         --correction-time-limit 600 --correction-iteration-limit 300000 \
         --host-double-polishing --host-double-time-limit 180 --host-double-iteration-limit 300000 \
-        --curtis-reid-iterations 20 --sv-max-iterations 5000 \
+        --geometric-mean-iterations 12 --curtis-reid-iterations 20 --sv-max-iterations 5000 \
         --fail-on-validation \
         --output-prefix "$RESULTS_DIR/$name" >> "$LOG" 2>&1
     echo "[$(date +%H:%M:%S)] finished $name" | tee -a "$LOG"

@@ -86,6 +86,7 @@ params.iteration_limit = 100000
 params.verbose = True
 params.presolve = True           # PSLP presolve (default); disable to use
                                  # warm starts
+params.geometric_mean_iterations = 12  # default; set 0 to disable
 solver = mlxpdlp.Solver(..., parameters=params, device="cpu")
 ```
 

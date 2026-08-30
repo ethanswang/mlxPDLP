@@ -66,6 +66,38 @@ retired after its requested final attempt, and `psched3-3` remains deferred at
 the documented PSLP postsolve-certificate boundary while this smaller bridge
 is expanded.
 
+### Geometric-mean default check
+
+On 2026-08-30, a two-tier fixed-protocol A/B selected 12 geometric-mean passes
+as the library default. The current easy/well-conditioned accuracy gate ran
+`nug08-3rd` and `qap15` at a `1e-5` float64 audit and `5e-6` solver target.
+Changing only `geometric_mean_iterations` from 0 to 12 produced identical
+iteration counts and audited metrics on both Metal/FP32 and CPU/FP64: 1,200
+and 4,400 iterations with the library-default `curtis_reid_iterations = 0`,
+or 1,200 and 5,200 with the LPfeas-tuned value 20. All 16 case/configuration
+results verified in one attempt, so geometric mean does not regress the
+stronger accuracy gate.
+
+The hard-case stress tier used all four bridge cases at a `1e-4` audit and
+`5e-5` solver target, with 300 seconds / 500,000 iterations per attempt, 5,000
+power-method iterations, and `curtis_reid_iterations = 0`. Every case again
+verified on both backends.
+
+- `fome13` dropped from 6,000 to 4,400 Metal iterations and from 6,000 to
+  4,600 CPU iterations, although extra host-double cleanup made its total time
+  roughly neutral.
+- `cont1` retained two audited Metal attempts but reduced reported aggregate
+  solve time from 299.2 to 157.0 seconds. On CPU it improved from a timed-out
+  first attempt plus a 200,000-iteration warm correction to one verified
+  193,600-iteration attempt.
+
+The existing LPfeas-tuned `curtis_reid_iterations = 20` portfolio also
+verified all four cases with geometric mean enabled; `cont1` was neutral
+(146.1 versus 146.8 seconds). On the default presolved path for `a2864`
+(20,078,717 source nonzeros, 1,378,816 reduced nonzeros), geometric mean added
+only 0.039 seconds to rescaling. These checks support enabling 12 passes by
+default while retaining 0 as the explicit opt-out.
+
 For the stronger normal-case accuracy check, `nug08-3rd` and `qap15` are the
 selected well-shaped LPfeas fixtures. On 2026-08-23, Metal FP32 plus the
 bounded host-FP64 correction passed both at an independent `1e-5`

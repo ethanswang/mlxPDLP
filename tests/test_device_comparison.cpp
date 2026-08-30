@@ -217,6 +217,7 @@ bool sparse_mixed_row_lengths_match(const mx::Device &device) {
     mlxpdlp_set_default_parameters(&params);
     params.verbose = false;
     params.presolve = false;
+    params.geometric_mean_iterations = 0;
     params.curtis_reid_iterations = 0;
     params.l_inf_ruiz_iterations = 0;
     params.has_pock_chambolle_alpha = false;
@@ -297,6 +298,7 @@ bool sparse_simdgroup_rows_match() {
     mlxpdlp_set_default_parameters(&params);
     params.verbose = false;
     params.presolve = false;
+    params.geometric_mean_iterations = 0;
     params.curtis_reid_iterations = 0;
     params.l_inf_ruiz_iterations = 0;
     params.has_pock_chambolle_alpha = false;
@@ -373,6 +375,7 @@ bool sparse_fused_unfused_match() {
         params.verbose = false;
         params.metal_fused_kernels = fused;
         params.presolve = false;
+        params.geometric_mean_iterations = 0;
         params.curtis_reid_iterations = 0;
         params.l_inf_ruiz_iterations = 0;
         params.has_pock_chambolle_alpha = false;
@@ -456,6 +459,7 @@ bool sparse_fused_unfused_simdgroup_match() {
         params.verbose = false;
         params.metal_fused_kernels = fused;
         params.presolve = false;
+        params.geometric_mean_iterations = 0;
         params.curtis_reid_iterations = 0;
         params.l_inf_ruiz_iterations = 0;
         params.has_pock_chambolle_alpha = false;
@@ -551,6 +555,7 @@ bool sparse_fused_short_dimension_boundary_match() {
             params.verbose = false;
             params.metal_fused_kernels = fused;
             params.presolve = false;
+            params.geometric_mean_iterations = 0;
             params.curtis_reid_iterations = 0;
             params.l_inf_ruiz_iterations = 0;
             params.has_pock_chambolle_alpha = false;

@@ -390,6 +390,7 @@ if(MLXPDLP_ENABLE_NETLIB_REGRESSION)
         --host-double-polishing
         --host-double-time-limit 30
         --host-double-iteration-limit 50000
+        --geometric-mean-iterations 12
         --curtis-reid-iterations 20
         --fail-on-validation
     )

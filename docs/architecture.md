@@ -36,7 +36,7 @@ line number so it remains useful as the source evolves.
 | MLX CPU execution | Implemented and tested |
 | MLX Metal GPU execution | Implemented and tested |
 | Explicit per-solver device selection | Implemented |
-| Ruiz, Pock-Chambolle, and bound/objective scaling | Enabled |
+| Geometric-mean, Ruiz, Pock-Chambolle, and bound/objective scaling | Enabled |
 | Halpern PDHG with adaptive restart | Implemented |
 | CSR input | Public input format |
 | Sparse Metal matrix-vector products | Implemented with custom MLX Metal kernels |
@@ -346,11 +346,12 @@ row pointers and column indices. It also constructs the row structure of
 `Aᵀ` and records a source-index map from every transpose entry back to its
 entry in `A`.
 
-For a sparse Metal candidate, Ruiz and Pock-Chambolle scaling scan and update
-the host CSR values directly. Each pass costs `O(nnz + m + n)` and retains
-the cuPDLPx behavior that duplicate coordinates are distinct stored entries
-during scaling. Bounds, objective coefficients, warm starts, and cumulative
-scale factors receive their corresponding MLX vector transformations.
+For a sparse Metal candidate, geometric-mean, Ruiz, and Pock-Chambolle scaling
+scan and update the host CSR values directly. Each pass costs
+`O(nnz + m + n)` and retains the cuPDLPx behavior that duplicate coordinates
+are distinct stored entries during scaling. Bounds, objective coefficients,
+warm starts, and cumulative scale factors receive their corresponding MLX
+vector transformations.
 
 After scaling, `prepare_sparse_metal_backend()` rounds and mirrors the
 already-scaled values into transpose order and uploads:
@@ -462,6 +463,8 @@ post-Ruiz refresh is required).
 
 | Parameter | Default |
 |---|---:|
+| `geometric_mean_iterations` | `12` |
+| `curtis_reid_iterations` | `0` |
 | `l_inf_ruiz_iterations` | `10` |
 | `has_pock_chambolle_alpha` | `true` |
 | `pock_chambolle_alpha` | `1.0` |
@@ -535,10 +538,11 @@ reduced dimensions and presolve timing.
 Presolve support is compiled out with `MLXPDLP_BUILD_PRESOLVE=OFF`. Requesting
 presolve from such a build throws `std::runtime_error`.
 
-Warm starts initialize `x_cur` and `y_cur` before preconditioning. Ruiz,
-Pock-Chambolle, and bound/objective scaling transform them with the same
-factors applied by cuPDLPx, after which the normal Halpern anchors are
-initialized from the scaled starts. Non-finite entries are rejected.
+Warm starts initialize `x_cur` and `y_cur` before preconditioning.
+Geometric-mean, Ruiz, Pock-Chambolle, and bound/objective scaling transform
+them with the same factors applied by cuPDLPx, after which the normal Halpern
+anchors are initialized from the scaled starts. Non-finite entries are
+rejected.
 
 Warm starts and PSLP presolve cannot currently be combined: PSLP 0.0.8 does
 not expose mappings for projecting initial primal and dual iterates into the
@@ -549,9 +553,28 @@ reduced problem. The constructor rejects that combination with
 
 Preconditioning is active by default and runs in this order:
 
-1. L∞ Ruiz scaling;
-2. Pock-Chambolle scaling;
-3. bound/objective scaling.
+1. geometric-mean scaling;
+2. optional Curtis-Reid scaling when requested;
+3. L∞ Ruiz scaling;
+4. Pock-Chambolle scaling;
+5. bound/objective scaling.
+
+### Geometric-mean scaling
+
+The default 12 alternating passes match cuPDLPx's Tomlin scaler. Starting
+with unit row and column multipliers, each pass updates rows and then columns:
+
+```text
+row_multiplier[i] = 1 / sqrt(min_j(abs(A[i,j]) * col_multiplier[j])
+                              * max_j(abs(A[i,j]) * col_multiplier[j]))
+col_multiplier[j] = 1 / sqrt(min_i(abs(A[i,j]) * row_multiplier[i])
+                              * max_i(abs(A[i,j]) * row_multiplier[i]))
+```
+
+Zeros and non-finite products are ignored, empty rows or columns retain their
+previous multiplier, and every multiplier is clamped to `[1e-20, 1e20]`.
+After the configured passes, the matrix, bounds, objective, warm start, and
+cumulative scale arrays receive the converged diagonal scaling once.
 
 ### L∞ Ruiz scaling
 

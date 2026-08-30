@@ -82,6 +82,7 @@ typedef struct {
 } termination_criteria_t;
 
 typedef struct {
+    int geometric_mean_iterations;
     int curtis_reid_iterations;
     int l_inf_ruiz_iterations;
     bool has_pock_chambolle_alpha;
@@ -525,6 +526,7 @@ class MlxPdlpSolver {
                            const double *host_con_lb, const double *host_con_ub);
 
     // ---- Preconditioning ----
+    void mlx_geometric_mean_scaling(int num_iters);
     void mlx_curtis_reid_scaling(int num_iters);
     void mlx_ruiz_scaling(int num_iters);
     void mlx_pock_chambolle_scaling(double alpha);

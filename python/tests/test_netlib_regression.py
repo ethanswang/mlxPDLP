@@ -97,7 +97,8 @@ def _solve_with_fallback(name, device):
     Aggressive PSLP can amplify an approximate dual certificate through
     its inverse map (especially on FP32 Metal), so this helper retries
     without presolve when the safe-PSLP certificate misses the 1e-4
-    audit.
+    audit. If the default PID restart trajectory also misses, mirror the
+    C++ benchmark portfolio's HPR restart fallback.
     """
     path = os.path.join(DATA_DIR, f"{name}.mps.gz")
     parameters = mlxpdlp.Parameters()
@@ -108,6 +109,9 @@ def _solve_with_fallback(name, device):
     result = mlxpdlp.solve_mps(path, device=device, parameters=parameters)
     if not _passes(name, device, result):
         parameters.presolve = False
+        result = mlxpdlp.solve_mps(path, device=device, parameters=parameters)
+    if not _passes(name, device, result):
+        parameters.restart_policy = 1
         result = mlxpdlp.solve_mps(path, device=device, parameters=parameters)
     return result
 
