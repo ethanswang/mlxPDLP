@@ -291,23 +291,23 @@ on dual-side convergence.
 
 Current equal-work reference measurements on two large sparse LPfeas
 instances (cold machine, presolve off, identical PDHG iteration
-counts, mlxPDLP 0.1.0, M3 Max 16-core/64 GB, 2026-08-12):
+counts, mlxPDLP 0.1.0, M3 Max 16-core/64 GB, 2026-08-30):
 
 | Instance | Iterations | CPU FP64 solve | Metal FP32 solve | Solve speedup | Per-iteration CPU / Metal |
 |---|---:|---:|---:|---:|---:|
-| `s82` (7.0M nnz) | 20,000 | 191.7 s | 53.2 s | 3.60x | 9.51 ms / 2.62 ms |
-| `dlr1` (18.4M nnz) | 10,000 | 470.3 s | 73.2 s | 6.42x | 47.06 ms / 7.08 ms |
+| `s82` (7.0M nnz) | 20,000 | 200.4 s | 34.0 s | 5.89x | 10.02 ms / 1.70 ms |
+| `dlr1` (18.4M nnz) | 10,000 | 572.5 s | 39.9 s | 14.34x | 57.25 ms / 3.99 ms |
 
 Both backends stay in CSR for preprocessing and iteration (the dense
 `A + A^T` payload would be 1,108 GiB for `s82` and 118 TiB for `dlr1`;
 CSR + transpose CSR is 114 MiB / 322 MiB). Setup plus preconditioning
-(Ruiz, Pock-Chambolle, 100 power-method iterations) costs <= 2.5 s on
+(geometric mean, Ruiz, Pock-Chambolle, 100 power-method iterations) costs <= 2.5 s on
 either backend, so the entire gap lives in the iteration loop. The
 Metal advantage combines half the traffic (FP32 vs FP64) with higher
-memory bandwidth: effective SpMV bandwidth is 21.5 vs 11.8 GB/s on
-`s82` and 20.8 vs 6.2 GB/s on `dlr1`. Both trajectories agree to three
-digits at fixed work, so this is equal-work throughput, not a
-convergence artifact.
+memory bandwidth: effective SpMV bandwidth is 33.1 vs 11.2 GB/s on
+`s82` and 36.9 vs 5.1 GB/s on `dlr1`. Both backends execute the same
+fixed iteration count, so this measures equal-work throughput rather
+than convergence timing.
 
 Run the PILOT87 workload (fetch the instance data first — it is not
 distributed in this repository):
@@ -345,7 +345,7 @@ recipe are in [data/netlib/README.md](data/netlib/README.md).
 ## Reference result
 
 The fixed-work reference measurements are the LPfeas table at the top of
-this section (`s82` 3.60x, `dlr1` 6.42x solve speedup, 2026-08-12).
+this section (`s82` 5.89x, `dlr1` 14.34x solve speedup, 2026-08-30).
 The small Netlib corpus remains available for smoke-testing the
 benchmark executable, but Netlib measurements are reserved for the
 regression suite rather than performance claims.

@@ -438,12 +438,12 @@ fallback because it is tiny.
 
 Fixed-work, equal-iteration head-to-head measurements (presolve off,
 identical PDHG work, cold machine; Apple M3 Max, 16 cores, 64 GB;
-mlxPDLP 0.1.0, 2026-08-12):
+mlxPDLP 0.1.0, 2026-08-30):
 
 | LPfeas instance | Size (rows x cols / nonzeros) | CPU FP64 | Metal FP32 | Speedup |
 |---|---:|---:|---:|---:|
-| `s82` | 87,878 x 1,690,631 / 7.0M | 191.7 s | 53.2 s | **3.6x** |
-| `dlr1` | 1,735,470 x 9,142,907 / 18.4M | 470.3 s | 73.2 s | **6.4x** |
+| `s82` | 87,878 x 1,690,631 / 7.0M | 200.4 s | 34.0 s | **5.9x** |
+| `dlr1` | 1,735,470 x 9,142,907 / 18.4M | 572.5 s | 39.9 s | **14.3x** |
 
 > **Accuracy note:** Apple Silicon GPUs do not expose FP64 arithmetic,
 > so Metal iteration runs in FP32. On normal, well-conditioned problems,
@@ -456,7 +456,7 @@ mlxPDLP 0.1.0, 2026-08-12):
 
 CPU runs the Accelerate sparse FP64 SpMV backend; Metal runs the CSR
 FP32 SpMV backend, so the advantage widens with model size (per
-iteration Metal is 3.6x faster on `s82` and 6.7x faster on `dlr1`,
+iteration Metal is 5.9x faster on `s82` and 14.3x faster on `dlr1`,
 with preconditioning overhead negligible on both backends). At the
 same `1e-4` audit, 42 of the 49 public LPfeas instances are verified
 on Metal FP32.
