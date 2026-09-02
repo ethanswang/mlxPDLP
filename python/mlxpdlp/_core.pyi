@@ -63,6 +63,7 @@ class Parameters:
     termination_criteria: TerminationCriteria
     restart_params: RestartParameters
     restart_policy: int
+    conditional_termination_evaluation: bool
     reflection_coefficient: float
     feasibility_polishing: bool
     host_double_polishing: bool

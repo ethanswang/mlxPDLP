@@ -120,6 +120,7 @@ struct Options {
     int jobs = 0;
     bool jobs_auto = true;
     bool feasibility_polishing = true;
+    bool conditional_termination_evaluation = true;
     bool host_double_polishing = true;
     bool host_double_early_handoff = true;
     bool presolve = true;
@@ -420,6 +421,8 @@ void print_usage(const char *program) {
         "  --correction-iteration-limit N  Warm-start correction limit (default 200000)\n"
         "  --correction-time-limit SECONDS Warm-start correction limit (default 300)\n"
         "  --evaluation-frequency N    Termination cadence (default 200)\n"
+        "  --conditional-evaluation    Add convergence-aware midpoint checks (default)\n"
+        "  --no-conditional-evaluation Disable convergence-aware midpoint checks\n"
         "  --sv-max-iterations N       Power-method limit (default 200)\n"
         "  --geometric-mean-iterations N  Geometric-mean passes; 0 disables (default 12)\n"
         "  --curtis-reid-iterations N  Curtis-Reid passes; 0 disables (default 20)\n"
@@ -507,6 +510,10 @@ Options parse_options(int argc, char **argv) {
         else if (argument == "--evaluation-frequency")
             options.evaluation_frequency =
                 parse_positive_int(take_value(), "evaluation frequency");
+        else if (argument == "--conditional-evaluation")
+            options.conditional_termination_evaluation = true;
+        else if (argument == "--no-conditional-evaluation")
+            options.conditional_termination_evaluation = false;
         else if (argument == "--sv-max-iterations")
             options.singular_value_iterations =
                 parse_positive_int(take_value(), "singular value iterations");
@@ -904,6 +911,8 @@ RunRecord run_attempt(const ManifestEntry &entry, const fs::path &instance_path,
     parameters.host_double_polishing_time_sec_limit =
         options.host_double_polishing_time_limit_seconds;
     parameters.termination_evaluation_frequency = options.evaluation_frequency;
+    parameters.conditional_termination_evaluation =
+        options.conditional_termination_evaluation;
     parameters.sv_max_iter = options.singular_value_iterations;
     parameters.sv_tol = 1e-4;
     parameters.optimality_norm = NORM_TYPE_L2;
@@ -1590,6 +1599,8 @@ void write_json(const fs::path &path, const Options &options,
     output << ", \"time_limit_scope\": \"per_attempt\", \"iteration_limit\": "
            << options.iteration_limit
            << ", \"evaluation_frequency\": " << options.evaluation_frequency
+           << ", \"conditional_termination_evaluation\": "
+           << (options.conditional_termination_evaluation ? "true" : "false")
            << ", \"sv_max_iterations\": " << options.singular_value_iterations
            << ", \"sparse_cpu_dense_element_threshold\": 16777216"
            << ", \"geometric_mean_iterations\": "
@@ -1803,7 +1814,7 @@ int main(int argc, char **argv) {
                     entries.size() == 1 ? "" : "s");
         std::printf("Protocol: PSLP=%s/%s, singleton=%s, retry=%s/%s, warm-correct=%s/%d, "
                     "scale-retry=%s, audit-tol=%.1e, solver-tol=%.1e, time=%.0fs, "
-                    "eval=%d, sv-max=%d, geo=%d, CR=%d, polish=%s, host64=%s/%s/%d/%.0fs, "
+                    "eval=%d/%s, sv-max=%d, geo=%d, CR=%d, polish=%s, host64=%s/%s/%d/%.0fs, "
                     "jobs=%d (%s/%s)\n",
                     options.presolve ? "on" : "off",
                     options.presolve_primal_propagation ? "propagate" : "safe",
@@ -1815,6 +1826,7 @@ int main(int argc, char **argv) {
                     options.retry_without_curtis_reid ? "on" : "off", options.tolerance,
                     effective_solver_tolerance(options),
                     options.time_limit_seconds, options.evaluation_frequency,
+                    options.conditional_termination_evaluation ? "conditional" : "fixed",
                     options.singular_value_iterations, options.geometric_mean_iterations,
                     options.curtis_reid_iterations,
                     options.feasibility_polishing ? "on" : "off",

@@ -169,6 +169,8 @@ static void test_default_parameters() {
           "wrong geometric_mean_iterations");
     CHECK(params.l_inf_ruiz_iterations == 10, "wrong l_inf_ruiz_iterations");
     CHECK(params.termination_evaluation_frequency == 200, "wrong eval_freq");
+    CHECK(params.conditional_termination_evaluation,
+          "conditional early termination checks should default on");
     CHECK(params.sv_max_iter == 200, "wrong sv_max_iter");
     CHECK(params.sv_tol == 1e-4, "wrong sv_tol");
     CHECK(params.reflection_coefficient == 1.0, "wrong reflection_coeff");
@@ -611,7 +613,7 @@ static void test_iteration_limit_returns_best_iterate() {
     params.termination_evaluation_frequency = 100;
     params.termination_criteria.eps_optimal_relative = 0.0;
     params.termination_criteria.eps_feasible_relative = 0.0;
-    params.termination_criteria.iteration_limit = 600;
+    params.termination_criteria.iteration_limit = 550;
     params.termination_criteria.time_sec_limit = 60.0;
 
     MlxPdlpSolver solver(2, 2, row_ptr, col_ind, vals, var_lb, var_ub, con_lb, con_ub, obj, 0.0,
@@ -623,6 +625,8 @@ static void test_iteration_limit_returns_best_iterate() {
                   result->relative_objective_gap});
     CHECK(result->termination_reason == TERMINATION_REASON_ITERATION_LIMIT,
           "zero tolerances should force the iteration limit");
+    CHECK(result->total_count == 550,
+          "a partial final block must stop exactly at the iteration limit");
     CHECK(solver.state().best_iteration >= 0, "a best iterate should be recorded");
     CHECK(solver.state().best_iteration <= result->total_count,
           "best iteration must belong to the completed solve");
@@ -635,6 +639,77 @@ static void test_iteration_limit_returns_best_iterate() {
 
 test_cleanup:
     mlxpdlp_result_free(result);
+}
+
+static void test_conditional_termination_evaluation() {
+    TEST("conditional evaluation stops early without changing checkpoints");
+
+    int row_ptr[] = {0, 1};
+    int col_ind[] = {0};
+    double vals[] = {1.0};
+    double obj[] = {1.0};
+    double con_lb[] = {1.0};
+    double con_ub[] = {1.0};
+    double var_lb[] = {0.0};
+    double var_ub[] = {INFINITY};
+    mlxpdlp_result_t *fixed = nullptr;
+    mlxpdlp_result_t *conditional = nullptr;
+    mlxpdlp_result_t *strict_fixed = nullptr;
+    mlxpdlp_result_t *strict_conditional = nullptr;
+
+    auto solve_case = [&](double tolerance, bool enable_conditional) {
+        pdhg_parameters_t params;
+        mlxpdlp_set_default_parameters(&params);
+        params.verbose = false;
+        params.presolve = false;
+        params.feasibility_polishing = false;
+        params.host_double_polishing = false;
+        params.termination_evaluation_frequency = 200;
+        params.conditional_termination_evaluation = enable_conditional;
+        params.termination_criteria.eps_optimal_relative = tolerance;
+        params.termination_criteria.eps_feasible_relative = tolerance;
+        params.termination_criteria.iteration_limit = 2000;
+        params.termination_criteria.time_sec_limit = 10.0;
+        MlxPdlpSolver solver(1, 1, row_ptr, col_ind, vals, var_lb, var_ub,
+                             con_lb, con_ub, obj, 0.0, &params,
+                             mx::Device::cpu);
+        return solver.solve();
+    };
+
+    fixed = solve_case(1e-3, false);
+    conditional = solve_case(1e-3, true);
+    CHECK(fixed->termination_reason == TERMINATION_REASON_OPTIMAL,
+          "fixed-cadence control should converge");
+    CHECK(conditional->termination_reason == TERMINATION_REASON_OPTIMAL,
+          "conditional checkpoint should return a certified solution");
+    CHECK(conditional->total_count < fixed->total_count,
+          "near-convergence midpoint should stop before the next regular checkpoint");
+
+    // At a stricter tolerance, the iteration-300 midpoint is not scheduled.
+    // Both modes must therefore return the identical iteration-400 state.
+    strict_fixed = solve_case(1e-4, false);
+    strict_conditional = solve_case(1e-4, true);
+    CHECK(strict_conditional->total_count == strict_fixed->total_count,
+          "conditional checks must not perturb the regular checkpoint trajectory");
+    CHECK_CLOSE(strict_conditional->primal_solution[0],
+                strict_fixed->primal_solution[0], 1e-14,
+                "regular checkpoint primal state should be unchanged");
+    CHECK_CLOSE(strict_conditional->dual_solution[0],
+                strict_fixed->dual_solution[0], 1e-14,
+                "regular checkpoint dual state should be unchanged");
+
+    mlxpdlp_result_free(fixed);
+    mlxpdlp_result_free(conditional);
+    mlxpdlp_result_free(strict_fixed);
+    mlxpdlp_result_free(strict_conditional);
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(fixed);
+    mlxpdlp_result_free(conditional);
+    mlxpdlp_result_free(strict_fixed);
+    mlxpdlp_result_free(strict_conditional);
 }
 
 // Test 7: Repeated fresh solver instances (no memory leaks)
@@ -2168,6 +2243,7 @@ int main() {
     test_pure_equality();
     test_result_struct();
     test_iteration_limit_returns_best_iterate();
+    test_conditional_termination_evaluation();
     test_repeat_solve();
     test_solver_rejects_second_solve();
     test_singular_value_nullspace_start();

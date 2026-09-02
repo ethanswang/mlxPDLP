@@ -62,6 +62,9 @@ def test_parameters_defaults_and_roundtrip():
     assert p.termination_criteria.time_sec_limit == 12.5
     p.restart_params.k_p = 0.25
     assert p.restart_params.k_p == 0.25
+    assert p.conditional_termination_evaluation is True
+    p.conditional_termination_evaluation = False
+    assert p.conditional_termination_evaluation is False
 
 
 def test_small_lp_cpu():

@@ -156,6 +156,34 @@ static double elapsed_seconds(SteadyClock::time_point start) {
     return std::chrono::duration<double>(SteadyClock::now() - start).count();
 }
 
+// cuOpt Stable3 adds denser "conditional major" iterations while the solve is
+// young, then backs off logarithmically. Starting at 10 iterations is too eager
+// for MLX's lazy Metal graphs, so use the same shape shifted by one decade:
+// every 100 iterations below 10,000, then every 1,000 below 100,000, and so on.
+// Restart decisions retain their configured cadence so an extra Metal
+// synchronization cannot alter the PDHG trajectory.
+static int conditional_evaluation_interval(int total_count) {
+    int64_t step = 100;
+    int64_t threshold = 10000;
+    while (static_cast<int64_t>(total_count) >= threshold &&
+           step <= INT32_MAX / 10 && threshold <= INT32_MAX / 10) {
+        step *= 10;
+        threshold *= 10;
+    }
+    return static_cast<int>(step);
+}
+
+static int iterations_to_next_evaluation(int total_count, int regular_frequency,
+                                         bool conditional) {
+    const int regular = std::max(1, regular_frequency);
+    int distance = regular - total_count % regular;
+    if (conditional) {
+        const int early = conditional_evaluation_interval(total_count);
+        distance = std::min(distance, early - total_count % early);
+    }
+    return std::max(1, distance);
+}
+
 static mx::array mlx_array_from_doubles(const double *host_ptr, int size,
                                         mx::Dtype dtype) {
     if (dtype == mx::float64) {
@@ -261,6 +289,7 @@ void mlxpdlp_set_default_parameters(pdhg_parameters_t *p) {
     p->presolve_primal_propagation = false;
     p->matrix_zero_tol = 1e-9;
     p->metal_fused_kernels = true;
+    p->conditional_termination_evaluation = true;
 }
 
 void mlxpdlp_result_free(mlxpdlp_result_t *result) {
@@ -3511,7 +3540,7 @@ void MlxPdlpSolver::mlx_perform_restart() {
 // Termination check
 // ---------------------------------------------------------------------------
 
-bool MlxPdlpSolver::mlx_check_termination() {
+bool MlxPdlpSolver::mlx_check_termination(bool full_evaluation) {
     const auto &tc = params_.termination_criteria;
 
     double feas_tol = tc.eps_feasible_relative;
@@ -3554,8 +3583,9 @@ bool MlxPdlpSolver::mlx_check_termination() {
     const bool time_limit_reached =
         elapsed_seconds(s_.start_time) >= tc.time_sec_limit;
     const bool should_check_infeasibility =
-        !s_.sparse_metal_active || evaluation_block <= 1 ||
-        evaluation_block % blocks_per_infeasibility_check == 0 ||
+        (full_evaluation &&
+         (!s_.sparse_metal_active || evaluation_block <= 1 ||
+          evaluation_block % blocks_per_infeasibility_check == 0)) ||
         iteration_limit_reached || time_limit_reached;
     if (should_check_infeasibility) {
         mlx_compute_infeasibility_information();
@@ -3591,7 +3621,8 @@ bool MlxPdlpSolver::mlx_check_termination() {
     // margin before early transfer; post-limit recovery may use the wider gate.
     const double host_gap_gate = 0.5 * opt_tol;
     const bool host_handoff_admissible =
-        !s_.cpu_double_precision_active && params_.host_double_polishing &&
+        full_evaluation && !s_.cpu_double_precision_active &&
+        params_.host_double_polishing &&
         params_.host_double_early_handoff &&
         // Do not abandon fp32 for a continuation budget too small to complete
         // even one normal residual-evaluation block.
@@ -3621,7 +3652,7 @@ bool MlxPdlpSolver::mlx_check_termination() {
                      host_double_handoff_dual_slack_);
         }
     }
-    if (host_double_handoff_checkpoint_iteration_ >= 0) {
+    if (full_evaluation && host_double_handoff_checkpoint_iteration_ >= 0) {
         const int stagnation_window =
             25 * std::max(1, params_.termination_evaluation_frequency);
         if (s_.total_count - host_double_handoff_checkpoint_iteration_ >=
@@ -4506,7 +4537,16 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
     // ---- Phase 3: Main PDHG loop ----
     mlx_display_header();
 
-    int eval_freq = params_.termination_evaluation_frequency;
+    const int eval_freq = std::max(1, params_.termination_evaluation_frequency);
+    // A residual checkpoint reads A and A^T again and drains MLX's lazy graph.
+    // Keep cuOpt-style conditional checks to models whose two fp32 CSR copies
+    // fit in roughly 4 MiB; larger sparse LPs benchmark better at the regular
+    // cadence (notably s250r10 and s82 from LPfeas).
+    constexpr int max_conditional_evaluation_nnz = 1 << 18;
+    const bool use_conditional_evaluations =
+        params_.conditional_termination_evaluation &&
+        s_.nnz <= max_conditional_evaluation_nnz;
+    bool conditional_evaluation_admissible = false;
     bool do_restart = false;
     // On the fused sparse-Metal path, minor iterations accumulate in the lazy
     // graph and are materialized every fused_batch iterations; major
@@ -4514,9 +4554,26 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
     const int fused_batch = fused_eval_batch_size();
 
     while (s_.total_count < params_.termination_criteria.iteration_limit) {
-        // --- First iteration (major) ---
-        mlx_compute_next_primal(1, true);
-        mlx_compute_next_dual(1, true, true);
+        const int remaining =
+            params_.termination_criteria.iteration_limit - s_.total_count;
+        const int block_iterations = std::min(
+            remaining,
+            iterations_to_next_evaluation(
+                s_.total_count, eval_freq,
+                use_conditional_evaluations &&
+                    conditional_evaluation_admissible));
+        const int checkpoint_iteration = s_.total_count + block_iterations;
+        const bool restart_checkpoint = checkpoint_iteration % eval_freq == 0;
+        const bool limit_checkpoint = checkpoint_iteration >=
+                                      params_.termination_criteria.iteration_limit;
+
+        // A restart needs a materialized first PDHG candidate to seed its new
+        // fixed-point baseline. Otherwise the first iteration can use the
+        // cheaper minor kernel; only the checkpoint itself needs snapshots.
+        const bool first_is_major = do_restart || block_iterations == 1;
+        mlx_compute_next_primal(1, first_is_major);
+        mlx_compute_next_dual(1, first_is_major,
+                              first_is_major || fused_batch == 1);
 
         // After first iteration, check if we need a restart
         if (do_restart) {
@@ -4525,37 +4582,64 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
             do_restart = false;
         }
 
-        // --- Minor iterations 2 through eval_freq-1 ---
-        for (int i = 2; i <= eval_freq - 1; ++i) {
+        // --- Minor iterations 2 through the penultimate iteration ---
+        for (int i = 2; i < block_iterations; ++i) {
             mlx_compute_next_primal(i, false);
             mlx_compute_next_dual(i, false, i % fused_batch == 0);
         }
 
         // --- Last iteration (major) ---
-        mlx_compute_next_primal(eval_freq, true);
-        mlx_compute_next_dual(eval_freq, true, true);
+        if (block_iterations > 1) {
+            mlx_compute_next_primal(block_iterations, true);
+            mlx_compute_next_dual(block_iterations, true, true);
+        }
 
         // --- Periodic checks ---
-        mlx_compute_fixed_point_error();
+        if (restart_checkpoint) {
+            mlx_compute_fixed_point_error();
+        }
         mlx_compute_residual();
 
-        s_.inner_count += eval_freq;
-        s_.total_count += eval_freq;
+        s_.inner_count += block_iterations;
+        s_.total_count += block_iterations;
 
         // fp32 trajectories can improve and later regress substantially,
         // especially after a primal-weight restart. Preserve the best fully
         // evaluated KKT point so a time/iteration limit returns useful work.
         mlx_save_best_iterate();
 
-        mlx_display_iteration_stats();
+        if (restart_checkpoint) {
+            mlx_display_iteration_stats();
+        }
 
         // Termination check
-        if (mlx_check_termination()) {
+        if (mlx_check_termination(restart_checkpoint || limit_checkpoint)) {
             break;
         }
 
+        if (restart_checkpoint && use_conditional_evaluations) {
+            // Speculative residual checks only pay off close to convergence.
+            // Normalize each component independently because feasibility and
+            // optimality tolerances need not match.
+            constexpr double conditional_tolerance_factor = 10.0;
+            const auto &criteria = params_.termination_criteria;
+            conditional_evaluation_admissible =
+                std::isfinite(s_.relative_primal_residual) &&
+                std::isfinite(s_.relative_dual_residual) &&
+                std::isfinite(s_.relative_objective_gap) &&
+                s_.relative_primal_residual <=
+                    conditional_tolerance_factor *
+                        criteria.eps_feasible_relative &&
+                s_.relative_dual_residual <=
+                    conditional_tolerance_factor *
+                        criteria.eps_feasible_relative &&
+                std::fabs(s_.relative_objective_gap) <=
+                    conditional_tolerance_factor *
+                        criteria.eps_optimal_relative;
+        }
+
         // Adaptive restart check
-        if (mlx_should_adaptive_restart()) {
+        if (restart_checkpoint && mlx_should_adaptive_restart()) {
             mlx_perform_restart();
             do_restart = true;
         }

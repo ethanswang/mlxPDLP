@@ -167,6 +167,11 @@ static void bind_parameters(nb::module_ &m) {
         .def_rw("restart_policy", &pdhg_parameters_t::restart_policy,
                 "Primal-weight restart policy: 0 = cuPDLPx PID (default), "
                 "1 = HPR-LP-style sigma update, 2 = frozen-weight diagnostic.")
+        .def_rw("conditional_termination_evaluation",
+                &pdhg_parameters_t::conditional_termination_evaluation,
+                "Use Metal-adapted cuOpt Stable3-style early termination "
+                "checkpoints near convergence for working models up to 262,144 "
+                "nonzeros, without changing the configured restart cadence.")
         .def_rw("reflection_coefficient",
                 &pdhg_parameters_t::reflection_coefficient)
         .def_rw("feasibility_polishing",

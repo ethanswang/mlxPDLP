@@ -121,6 +121,14 @@ typedef struct {
     // Disable to fall back to the unfused MLX-expression formulation for A/B
     // comparison or diagnostics. Only affects the sparse Metal backend.
     bool metal_fused_kernels;
+    // Add Metal-adapted cuOpt Stable3-style early evaluation checkpoints,
+    // starting every 100 iterations below 10,000 and backing off by a decade
+    // at each subsequent threshold. They are limited to working models with at
+    // most 262,144 nonzeros and scheduled only after a normal checkpoint is
+    // within 10x of all requested tolerances. The extra checkpoints test
+    // termination and retain the best iterate, while primal-weight restarts
+    // stay on the normal cadence so the PDHG trajectory is unchanged.
+    bool conditional_termination_evaluation;
 } pdhg_parameters_t;
 
 typedef struct {
@@ -554,7 +562,10 @@ class MlxPdlpSolver {
     void mlx_perform_restart();
 
     // ---- Termination / restart checks ----
-    bool mlx_check_termination();
+    // `full_evaluation` enables the expensive infeasibility and host-handoff
+    // checks used at the configured restart cadence. Conditional early
+    // checkpoints still test optimality and hard limits.
+    bool mlx_check_termination(bool full_evaluation = true);
     bool mlx_should_adaptive_restart();
 
     // ---- Logging ----

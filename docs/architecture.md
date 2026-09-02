@@ -471,6 +471,7 @@ post-Ruiz refresh is required).
 | `bound_objective_rescaling` | `true` |
 | `verbose` | `true` |
 | `termination_evaluation_frequency` | `200` |
+| `conditional_termination_evaluation` | `true` |
 | `reflection_coefficient` | `1.0` |
 | `metal_fused_kernels` | `true` |
 | `sv_max_iter` | `200` |
@@ -667,16 +668,29 @@ step_size_dual   = step_size * primal_weight
 
 ## Halpern PDHG iteration
 
-Iterations are grouped into blocks of
-`termination_evaluation_frequency`, which defaults to 200.
+Iterations are grouped around restart checkpoints separated by
+`termination_evaluation_frequency`, which defaults to 200. A block is clipped
+to the remaining iteration budget, so the reported count never overshoots the
+configured limit.
 
 Each block contains:
 
-1. one major primal/dual iteration;
-2. minor iterations `2 ... eval_freq - 1`;
-3. one final major primal/dual iteration;
-4. fixed-point and residual evaluation;
-5. termination and restart checks.
+1. minor primal/dual iterations (the first becomes major only immediately
+   after a restart);
+2. one final major primal/dual iteration;
+3. fixed-point and residual evaluation;
+4. termination and restart checks.
+
+With `conditional_termination_evaluation=true`, the solver borrows cuOpt
+Stable3's conditional-major idea but adapts it to MLX's lazy Metal execution.
+After a regular checkpoint is within 10x of each requested tolerance, working
+models with at most 262,144 nonzeros receive a termination-only midpoint check
+every 100 iterations below 10,000. The interval grows by a decade at each
+subsequent threshold. These checks can stop sooner or preserve a better
+time-limited iterate, but do not compute fixed-point error or trigger a restart,
+so enabling them does not change the iterate trajectory at regular checkpoints.
+Larger sparse models retain the fixed cadence because another residual pass and
+Metal synchronization cost more than the expected saved iterations.
 
 Major iterations store `x_pdhg`, `y_pdhg`, and `dual_slack`. Minor
 iterations advance the running `x_cur` and `y_cur` without replacing those

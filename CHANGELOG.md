@@ -10,6 +10,11 @@ and the project intends to follow
 
 ### Added
 
+- Convergence-aware, cuOpt Stable3-inspired conditional termination
+  checkpoints (`conditional_termination_evaluation`, enabled by default): a
+  Metal-adapted midpoint check is used only near tolerance and only for working
+  models up to 262,144 nonzeros, while restart decisions retain their configured
+  cadence. The Python API and LPfeas benchmark protocol expose the switch.
 - Tomlin geometric-mean matrix scaling, with 12 alternating row/column passes
   enabled by default ahead of the existing Curtis-Reid, Ruiz, Pock-Chambolle,
   and bound/objective preconditioners; the iteration count is exposed through
@@ -37,6 +42,9 @@ and the project intends to follow
 
 ### Changed
 
+- PDHG evaluation blocks now stop exactly at the configured iteration limit and
+  use the cheaper minor fused kernel for their first iteration unless a restart
+  needs a new fixed-point baseline, avoiding discarded major snapshots.
 - Batch fixed-point, residual, objective, restart-distance, and
   infeasibility-ray reductions so each metric group needs one host
   synchronization instead of serial scalar round trips.
