@@ -389,6 +389,29 @@ static bool fixed_row_is_known(const MpsParserState *state, const char *name) {
             namemap_get(&state->row_map, name) != -1);
 }
 
+static int row_data_start(const MpsParserState *state, char **tokens,
+                          int n_tokens) {
+    return n_tokens > 0 && fixed_row_is_known(state, tokens[0]) ? 0 : 1;
+}
+
+static int bound_column_position(const MpsParserState *state, char **tokens,
+                                 int n_tokens) {
+    if (n_tokens <= 1)
+        return -1;
+
+    const bool second_is_column =
+        namemap_get(&state->col_map, tokens[1]) != -1;
+    const bool third_is_column =
+        n_tokens > 2 && namemap_get(&state->col_map, tokens[2]) != -1;
+
+    // Prefer the traditional "type set column [value]" interpretation when
+    // both names happen to identify columns. Otherwise a known second field
+    // means the optional set name was omitted.
+    if (third_is_column)
+        return 2;
+    return second_is_column ? 1 : -1;
+}
+
 // cuPDLPx treats whitespace tokenization as the canonical MPS path.  Keep that
 // behavior for ordinary/free records and invoke the fixed-column compatibility
 // parser only when the free tokens cannot describe a valid record.  This is
@@ -424,7 +447,7 @@ static bool free_record_is_valid(const MpsParserState *state, MpsSection section
     }
 
     if (section == SEC_RHS || section == SEC_RANGES) {
-        int pair_start_index = fixed_row_is_known(state, tokens[0]) ? 0 : 1;
+        int pair_start_index = row_data_start(state, tokens, n_tokens);
         if (n_tokens - pair_start_index < 2 ||
             (n_tokens - pair_start_index) % 2 != 0)
             return false;
@@ -437,8 +460,11 @@ static bool free_record_is_valid(const MpsParserState *state, MpsSection section
     }
 
     if (section == SEC_BOUNDS) {
-        if (n_tokens < 3 || n_tokens > 4 ||
-            namemap_get(&state->col_map, tokens[2]) == -1)
+        if (n_tokens < 2 || n_tokens > 4)
+            return false;
+        const int column_position =
+            bound_column_position(state, tokens, n_tokens);
+        if (column_position == -1)
             return false;
         const char *type = tokens[0];
         const bool needs_value = strcmp(type, "LO") == 0 ||
@@ -450,9 +476,13 @@ static bool free_record_is_valid(const MpsParserState *state, MpsSection section
                               strcmp(type, "BV") == 0;
         if (!needs_value && !no_value)
             return false;
+        const int values_after_column = n_tokens - column_position - 1;
         if (needs_value)
-            return n_tokens == 4 && fixed_value_is_numeric(tokens[3]);
-        return n_tokens == 3 || fixed_value_is_numeric(tokens[3]);
+            return values_after_column == 1 &&
+                   fixed_value_is_numeric(tokens[column_position + 1]);
+        return values_after_column == 0 ||
+               (values_after_column == 1 &&
+                fixed_value_is_numeric(tokens[column_position + 1]));
     }
 
     return true;
@@ -913,7 +943,7 @@ static int parse_rhs_section(MpsParserState *state, char **tokens, int n_tokens)
     // with no vector name starts directly with a known row (as emitted by the
     // Netlib compact-to-MPS converter for BLEND).  Named vectors retain the
     // traditional one-token prefix.
-    int pair_start_index = namemap_get(&state->row_map, tokens[0]) != -1 ? 0 : 1;
+    int pair_start_index = row_data_start(state, tokens, n_tokens);
     for (int i = pair_start_index; i + 1 < n_tokens; i += 2) {
         const char *row_name = tokens[i];
         double value = atof(tokens[i + 1]);
@@ -940,7 +970,7 @@ static int parse_rhs_section(MpsParserState *state, char **tokens, int n_tokens)
 
 static int parse_ranges_section(MpsParserState *state, char **tokens, int n_tokens) {
     // RANGES uses the same optional vector-name convention as RHS.
-    int pair_start_index = namemap_get(&state->row_map, tokens[0]) != -1 ? 0 : 1;
+    int pair_start_index = row_data_start(state, tokens, n_tokens);
     for (int i = pair_start_index; i + 1 < n_tokens; i += 2) {
         const char *row_name = tokens[i];
         double range_val = atof(tokens[i + 1]);
@@ -968,13 +998,18 @@ static int parse_ranges_section(MpsParserState *state, char **tokens, int n_toke
 }
 
 static int parse_bounds_section(MpsParserState *state, char **tokens, int n_tokens) {
-    if (n_tokens < 3)
+    if (n_tokens < 2)
         return 0;
 
     const char *bound_type = tokens[0];
 
-    const char *col_name = tokens[2];
-    double value = (n_tokens > 3) ? atof(tokens[3]) : 0.0;
+    const int column_position =
+        bound_column_position(state, tokens, n_tokens);
+    if (column_position == -1)
+        return 0;
+    const char *col_name = tokens[column_position];
+    double value =
+        column_position + 1 < n_tokens ? atof(tokens[column_position + 1]) : 0.0;
 
     int col_idx = namemap_get(&state->col_map, col_name);
     if (col_idx == -1)

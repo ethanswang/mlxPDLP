@@ -309,6 +309,7 @@ if(BUILD_TESTING)
         )
         target_compile_definitions(mlxpdlp_mps_parser_test PRIVATE
             OMITTED_RHS_NAME_MPS="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mps/omitted_rhs_name.mps"
+            NAMELESS_SECTIONS_FREE_MPS="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mps/nameless_sections_free.mps"
             FIXED_NAMES_WITH_SPACES_MPS="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mps/fixed_names_with_spaces.mps"
             FREE_FORMAT_LONG_NAMES_MPS="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mps/free_format_long_names.mps"
             FREE_ALIGNED_NUMERIC_MPS="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mps/free_aligned_numeric.mps"

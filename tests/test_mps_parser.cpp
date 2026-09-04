@@ -56,6 +56,39 @@ void test_omitted_rhs_vector_name() {
     mlxpdlp_mps_problem_free(problem);
 }
 
+void test_free_format_sections_without_set_names() {
+    mlxpdlp_mps_problem_t *problem =
+        mlxpdlp_mps_problem_load(NAMELESS_SECTIONS_FREE_MPS);
+    CHECK(problem != nullptr, "nameless free-format fixture should parse");
+    if (!problem)
+        return;
+
+    CHECK(problem->num_variables == 2, "nameless variable count");
+    CHECK(problem->num_constraints == 3, "nameless constraint count");
+    CHECK(std::fabs(problem->objective_constant - 1.5) <= 1e-15,
+          "objective-first nameless RHS constant");
+    CHECK(std::fabs(problem->constraint_lb[0] - 5.0) <= 1e-15 &&
+              std::fabs(problem->constraint_ub[0] - 5.0) <= 1e-15,
+          "objective-first nameless RHS constraint pair");
+    CHECK(std::isinf(problem->constraint_lb[1]) &&
+              problem->constraint_lb[1] < 0.0 &&
+              std::fabs(problem->constraint_ub[1] - 2.0) <= 1e-15,
+          "nameless RHS less-than row");
+    CHECK(std::fabs(problem->constraint_lb[2] - 2.0) <= 1e-15 &&
+              std::fabs(problem->constraint_ub[2] - 8.0) <= 1e-15,
+          "nameless RANGES row");
+    CHECK(std::isinf(problem->variable_lb[0]) &&
+              problem->variable_lb[0] < 0.0 &&
+              std::fabs(problem->variable_ub[0] - 4.0) <= 1e-15,
+          "nameless upper and minus-infinity bounds");
+    CHECK(std::fabs(problem->variable_lb[1] - 0.5) <= 1e-15 &&
+              std::isinf(problem->variable_ub[1]) &&
+              problem->variable_ub[1] > 0.0,
+          "nameless lower bound");
+
+    mlxpdlp_mps_problem_free(problem);
+}
+
 void test_fixed_column_names_with_spaces() {
     mlxpdlp_mps_problem_t *problem =
         mlxpdlp_mps_problem_load(FIXED_NAMES_WITH_SPACES_MPS);
@@ -131,6 +164,7 @@ void test_free_aligned_numeric_fields_use_cupdlpx_tokenization() {
 
 int main() {
     test_omitted_rhs_vector_name();
+    test_free_format_sections_without_set_names();
     test_fixed_column_names_with_spaces();
     test_free_format_long_names_are_not_truncated();
     test_free_aligned_numeric_fields_use_cupdlpx_tokenization();
