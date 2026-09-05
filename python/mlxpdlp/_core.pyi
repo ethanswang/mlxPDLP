@@ -26,6 +26,7 @@ class TerminationCriteria:
     eps_optimal_relative: float
     eps_feasible_relative: float
     eps_feas_polish_relative: float
+    eps_infeasible_relative: float
     time_sec_limit: float
     iteration_limit: int
 

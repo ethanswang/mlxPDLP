@@ -720,6 +720,73 @@ bool spmv_simdgroup_threshold_override() {
     return valid;
 }
 
+bool infeasibility_tolerance_is_independent(const mx::Device &device) {
+    // Two feasible models with misleading approximate rays:
+    //   x0 = 1, x0 + 1e-5*x1 = 2 has the feasible point (1, 1e5).
+    //   min -x0, 1e-5*x0 <= 1, x1 = 0, x0 >= 0 is bounded at -1e5.
+    // Their ray residual ratios can pass the old 1e-3 Metal floor even
+    // though neither model is infeasible or unbounded. Keep scaling off to
+    // preserve the small coefficient, and stop before they converge.
+    for (bool near_unbounded : {false, true}) {
+        int row_ptr[] = {0, 1, near_unbounded ? 2 : 3};
+        int col_ind[] = {0, near_unbounded ? 1 : 0, 1};
+        double values[] = {near_unbounded ? 1e-5 : 1.0, 1.0, 1e-5};
+        double var_lb[] = {near_unbounded ? 0.0 : -INFINITY, -INFINITY};
+        double var_ub[] = {INFINITY, INFINITY};
+        double con_lb[] = {near_unbounded ? -INFINITY : 1.0,
+                           near_unbounded ? 0.0 : 2.0};
+        double con_ub[] = {1.0, near_unbounded ? 0.0 : 2.0};
+        double objective[] = {near_unbounded ? -1.0 : 0.0, 0.0};
+        double primal_start[] = {1.5, 0.0};
+        for (double infeas_tol : {1e-14, 1e-6}) {
+            for (double feas_tol : {1e-4, 1e-2}) {
+                pdhg_parameters_t params;
+                mlxpdlp_set_default_parameters(&params);
+                params.verbose = false;
+                params.presolve = false;
+                params.geometric_mean_iterations = 0;
+                params.l_inf_ruiz_iterations = 0;
+                params.has_pock_chambolle_alpha = false;
+                params.bound_objective_rescaling = false;
+                params.conditional_termination_evaluation = false;
+                params.termination_evaluation_frequency = 200;
+                params.termination_criteria.iteration_limit = 200;
+                params.termination_criteria.time_sec_limit = 10.0;
+                params.termination_criteria.eps_infeasible_relative = infeas_tol;
+                params.termination_criteria.eps_feasible_relative = feas_tol;
+
+                MlxPdlpSolver solver(2, 2, row_ptr, col_ind, values, var_lb,
+                                     var_ub, con_lb, con_ub, objective, 0.0,
+                                     &params, near_unbounded ? nullptr : primal_start,
+                                     nullptr, device);
+                mlxpdlp_result_t *result = solver.solve();
+                const double gap = near_unbounded
+                                       ? -result->primal_ray_linear_objective
+                                       : result->dual_ray_objective;
+                const double residual = near_unbounded
+                                            ? result->max_primal_ray_infeasibility
+                                            : result->max_dual_ray_infeasibility;
+                const double ratio = residual / gap;
+                const bool valid = result->termination_reason ==
+                                       TERMINATION_REASON_ITERATION_LIMIT &&
+                                   gap > 0.0 && ratio > infeas_tol && ratio < 1e-3;
+                destroy_result(result);
+                if (!valid) {
+                    std::fprintf(stderr,
+                                 "%s near-%s certificate tolerance regression "
+                                 "(infeas_tol=%g feas_tol=%g ratio=%g)\n",
+                                 device_name(device),
+                                 near_unbounded ? "unbounded" : "infeasible",
+                                 infeas_tol, feas_tol, ratio);
+                    return false;
+                }
+            }
+        }
+    }
+    std::printf("%s independent infeasibility tolerance PASS\n", device_name(device));
+    return true;
+}
+
 bool infeasibility_certificates_match() {
     // GPU-side Farkas termination coverage: a provably unbounded LP
     // (min -x subject to x >= 0) that FP32 Metal certifies cleanly. The FP64
@@ -884,6 +951,9 @@ int main() {
         std::fprintf(stderr, "MLX/CPU returned an incorrect LP solution\n");
         return 1;
     }
+    if (!infeasibility_tolerance_is_independent(mx::Device::cpu)) {
+        return 1;
+    }
 
     if (!mx::is_available(mx::Device::gpu)) {
         std::printf("\nMLX/GPU comparison SKIPPED: this MLX library has no GPU "
@@ -900,6 +970,9 @@ int main() {
         return 1;
     }
     print_summary(device_name(mx::Device::gpu), gpu);
+    if (!infeasibility_tolerance_is_independent(mx::Device::gpu)) {
+        return 1;
+    }
 
     if (!valid_solution(gpu) || !close(cpu.primal[0], gpu.primal[0]) ||
         !close(cpu.primal[1], gpu.primal[1]) || !close(cpu.objective, gpu.objective)) {

@@ -61,7 +61,7 @@ list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(MLX REQUIRED MODULE)
 
 if(MLXPDLP_BUILD_PRESOLVE)
-    find_package(PSLP 0.0.8 CONFIG QUIET)
+    find_package(PSLP 0.0.11 CONFIG QUIET)
     if(NOT TARGET PSLP::PSLP)
         include(FetchContent)
 
@@ -81,9 +81,9 @@ if(MLXPDLP_BUILD_PRESOLVE)
         endif()
         if(NOT MLXPDLP_ALLOW_DOWNLOADS AND
            NOT FETCHCONTENT_SOURCE_DIR_PSLP)
-            file(WRITE "${MLXPDLP_MISSING_PSLP_MARKER}" "PSLP 0.0.8\n")
+            file(WRITE "${MLXPDLP_MISSING_PSLP_MARKER}" "PSLP 0.0.11\n")
             message(FATAL_ERROR
-                "PSLP 0.0.8 was not found and dependency downloads are "
+                "PSLP 0.0.11 was not found and dependency downloads are "
                 "disabled. Provide PSLP_DIR or FETCHCONTENT_SOURCE_DIR_PSLP, "
                 "configure with -DMLXPDLP_BUILD_PRESOLVE=OFF, or explicitly "
                 "allow the download with -DMLXPDLP_ALLOW_DOWNLOADS=ON.")
@@ -93,10 +93,23 @@ if(MLXPDLP_BUILD_PRESOLVE)
         FetchContent_Declare(
             pslp
             GIT_REPOSITORY https://github.com/dance858/PSLP.git
-            GIT_TAG v0.0.8
+            GIT_TAG v0.0.11
             GIT_SHALLOW TRUE
         )
         FetchContent_MakeAvailable(pslp)
+        # Source overrides and reused checkouts bypass GIT_TAG. Enforce the
+        # same minimum version as find_package so an old cache cannot silently
+        # omit the presolve/postsolve fixes required by this release.
+        get_directory_property(MLXPDLP_PSLP_SOURCE_VERSION
+            DIRECTORY "${pslp_SOURCE_DIR}" DEFINITION PSLP_VERSION)
+        if(NOT MLXPDLP_PSLP_SOURCE_VERSION OR
+           MLXPDLP_PSLP_SOURCE_VERSION VERSION_LESS 0.0.11)
+            message(FATAL_ERROR
+                "PSLP 0.0.11 or newer is required, but ${pslp_SOURCE_DIR} "
+                "reports version '${MLXPDLP_PSLP_SOURCE_VERSION}'. Provide an "
+                "updated FETCHCONTENT_SOURCE_DIR_PSLP or use a fresh build "
+                "directory with MLXPDLP_ALLOW_DOWNLOADS=ON.")
+        endif()
         file(REMOVE "${MLXPDLP_MISSING_PSLP_MARKER}")
         if(TARGET PSLP AND NOT TARGET PSLP::PSLP)
             add_library(PSLP::PSLP ALIAS PSLP)

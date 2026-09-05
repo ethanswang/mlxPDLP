@@ -178,6 +178,8 @@ static void test_default_parameters() {
     CHECK(params.restart_params.k_p == 0.99, "wrong k_p");
     CHECK(params.termination_criteria.eps_optimal_relative == 1e-4, "wrong eps_opt");
     CHECK(params.termination_criteria.eps_feasible_relative == 1e-4, "wrong eps_feas");
+    CHECK(params.termination_criteria.eps_infeasible_relative == 1e-14,
+          "wrong eps_infeasible");
     CHECK(params.termination_criteria.eps_feas_polish_relative == 1e-6,
           "wrong eps_feas_polish");
     CHECK(!params.presolve_primal_propagation,
@@ -1953,7 +1955,9 @@ static void test_pdhg_infeasibility_certificates() {
     // Provably primal-infeasible (x = 3 and x = 2 simultaneously) and
     // provably unbounded (min -x subject to x >= 0) fixtures with presolve
     // disabled, so PDHG itself must certify the status through the Farkas
-    // separation ray tests. The FP64 CPU path certifies both.
+    // separation ray tests. As in cuPDLPx #106, opt into a 1e-6 certificate
+    // tolerance for approximate rays; the default 1e-14 favors avoiding
+    // false infeasibility on nearly infeasible models.
     mlxpdlp_result_t *result = nullptr;
 
     {
@@ -1970,6 +1974,7 @@ static void test_pdhg_infeasibility_certificates() {
         mlxpdlp_set_default_parameters(&params);
         params.verbose = false;
         set_safe_limits(&params);
+        params.termination_criteria.eps_infeasible_relative = 1e-6;
 
         MlxPdlpSolver solver(1, 2, row_ptr, col_ind, vals, var_lb, var_ub,
                              con_lb, con_ub, obj, 0.0, &params);
@@ -1996,6 +2001,7 @@ static void test_pdhg_infeasibility_certificates() {
         mlxpdlp_set_default_parameters(&params);
         params.verbose = false;
         set_safe_limits(&params);
+        params.termination_criteria.eps_infeasible_relative = 1e-6;
 
         MlxPdlpSolver solver(1, 1, row_ptr, col_ind, vals, var_lb, var_ub,
                              con_lb, con_ub, obj, 0.0, &params);

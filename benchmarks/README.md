@@ -33,7 +33,7 @@ benchmarks/data/lpfeas/download.sh
   --output-prefix benchmarks/results/lpfeas-metal
 ```
 
-The default protocol uses Metal CSR in FP32, PSLP 0.0.8, L2 residuals,
+The default protocol uses Metal CSR in FP32, PSLP 0.0.11, L2 residuals,
 12 geometric-mean iterations, 10 Ruiz iterations, Pock-Chambolle alpha 1,
 bound/objective scaling, evaluation frequency 200, up to 5,000 power-method
 iterations, a 1,000-second per-attempt limit, and a practical `1e-4`

@@ -147,7 +147,7 @@ PresolveOutcome run_presolve(const HostProblemView &problem, double matrix_zero_
         };
 
         if (verbose) {
-            std::printf("\nPresolve (PSLP 0.0.8)\n");
+            std::printf("\nPresolve (PSLP 0.0.11)\n");
             std::printf("  status: %s\n", presolve_status_string(status));
             std::printf("  reduced problem: %d rows, %d columns, %d nonzeros\n",
                         reduced_view.num_constraints, reduced_view.num_variables,

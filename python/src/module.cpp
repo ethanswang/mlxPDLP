@@ -86,7 +86,11 @@ static mx::Device parse_device(const std::string &device) {
 static void bind_parameters(nb::module_ &m) {
     nb::class_<termination_criteria_t>(m, "TerminationCriteria",
                                        "Convergence tolerances and budgets.")
-        .def(nb::init<>())
+        .def("__init__", [](termination_criteria_t *self) {
+            pdhg_parameters_t defaults;
+            mlxpdlp_set_default_parameters(&defaults);
+            new (self) termination_criteria_t(defaults.termination_criteria);
+        })
         .def_rw("eps_optimal_relative",
                 &termination_criteria_t::eps_optimal_relative,
                 "Relative optimality (objective gap) tolerance.")
@@ -96,6 +100,10 @@ static void bind_parameters(nb::module_ &m) {
         .def_rw("eps_feas_polish_relative",
                 &termination_criteria_t::eps_feas_polish_relative,
                 "Feasibility-polishing phase tolerance.")
+        .def_rw("eps_infeasible_relative",
+                &termination_criteria_t::eps_infeasible_relative,
+                "Relative ray-certificate residual tolerance (default 1e-14); "
+                "must be finite and positive. Independent of Parameters.tolerance.")
         .def_rw("time_sec_limit", &termination_criteria_t::time_sec_limit,
                 "Wall-clock budget in seconds.")
         .def_rw("iteration_limit", &termination_criteria_t::iteration_limit,

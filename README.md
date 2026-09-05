@@ -50,7 +50,7 @@ or the original cuPDLPx source tree.
 - A C++20 compiler
 - An MLX C++ library (reused when installed or supplied, otherwise obtainable
   by the source-level `make` bootstrap)
-- PSLP 0.0.8 when `MLXPDLP_BUILD_PRESOLVE=ON` (reused when available or
+- PSLP 0.0.11 when `MLXPDLP_BUILD_PRESOLVE=ON` (reused when available or
   downloaded under the same explicit build-dependency consent)
 - Zlib when `MLXPDLP_BUILD_MPS=ON`
 - macOS and Apple Silicon for the Metal path
@@ -78,7 +78,7 @@ tiny LP proves API correctness but cannot show GPU acceleration.
 `MLX_BUILD_DIR`, followed by normal CMake search locations. It first attempts
 the complete configure with network access disabled. If MLX or PSLP is missing,
 it asks once before any download. The prompt covers the tested MLX revision,
-PSLP 0.0.8, MLX's metal-cpp archive from `developer.apple.com`, and its pinned
+PSLP 0.0.11, MLX's metal-cpp archive from `developer.apple.com`, and its pinned
 JSON/fmt sources from `github.com`. Allow roughly 1 GB of free disk space and
 several minutes for the first MLX compilation. Approved dependencies are built
 privately under `_deps/` or the project build tree; no system prefix is
@@ -250,7 +250,7 @@ not part of the tested dependency combination.
 | Option | Default | Purpose |
 |---|---:|---|
 | `BUILD_TESTING` | `ON` | Build the regression and device tests |
-| `MLXPDLP_BUILD_PRESOLVE` | `ON` | Build PSLP 0.0.8 presolve/postsolve support |
+| `MLXPDLP_BUILD_PRESOLVE` | `ON` | Build PSLP 0.0.11 presolve/postsolve support |
 | `MLXPDLP_BUILD_MPS` | `ON` | Build the bundled MPS loader |
 | `MLXPDLP_BUILD_EXAMPLES` | `ON` | Build Metal correctness, convergence, and acceleration examples |
 | `MLXPDLP_BUILD_BENCHMARKS` | `OFF` | Build fixed-work and LPfeas Metal benchmarks |
@@ -354,6 +354,14 @@ MlxPdlpSolver solver(
     objective, objective_constant, &parameters,
     primal_start, dual_start, mx::Device::cpu);
 ```
+
+`parameters.termination_criteria.eps_infeasible_relative` controls the relative
+ray-certificate residual required to declare infeasibility or unboundedness.
+It defaults to `1e-14`, must be finite and positive, and is independent of the
+optimality and feasibility tolerances. Both CPU and Metal honor the requested
+ratio; Metal also rejects separation gaps near its FP32 arithmetic floor. A
+less strict value such as `1e-6` can recognize more approximate rays, with a
+corresponding risk of misclassifying nearly infeasible models.
 
 PSLP presolve is enabled by the default parameters when presolve support was
 built. Set `parameters.presolve = false` to use warm starts or to run the
@@ -555,7 +563,7 @@ The Curtis-Reid step-size initialization heuristic follows the approach of
 copied from HPR-LP-C; the reference is an algorithmic acknowledgment.
 
 Optional presolve and postsolve use
-[PSLP 0.0.8](https://github.com/dance858/PSLP), also licensed under
+[PSLP 0.0.11](https://github.com/dance858/PSLP), also licensed under
 Apache-2.0.
 
 ## Authors

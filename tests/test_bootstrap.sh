@@ -74,7 +74,7 @@ if env \
     fail "declining a required PSLP download unexpectedly succeeded"
 fi
 assert_contains "$case_dir/output" "Approval allows this make invocation"
-assert_contains "$case_dir/output" "PSLP v0.0.8"
+assert_contains "$case_dir/output" "PSLP v0.0.11"
 assert_contains "$case_dir/output" "metal-cpp source from developer.apple.com"
 assert_contains "$case_dir/output" "JSON/fmt sources from github.com"
 assert_contains "$case_dir/output" "PSLP is required for presolve"

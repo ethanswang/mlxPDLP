@@ -67,8 +67,15 @@ params.presolve_primal_propagation = False   # safe PSLP
 params.geometric_mean_iterations = 12        # 0 disables
 params.curtis_reid_iterations = 20
 params.termination_criteria.eps_optimal_relative = 1e-5   # fine-grained
+params.termination_criteria.eps_infeasible_relative = 1e-14  # default
 params.restart_params.k_p = 0.25
 ```
+
+`eps_infeasible_relative` controls the relative ray-certificate residual and
+must be finite and positive. It defaults to `1e-14` on both CPU and Metal and
+is independent of `Parameters.tolerance`. Increasing it can detect less
+accurate rays but can misclassify nearly infeasible models. Metal also keeps
+a separate significance floor on the certificate gap to reject FP32 noise.
 
 `Parameters.restart_policy` selects the primal-weight restart rule:
 `0` = cuPDLPx PID (default), `1` = HPR-LP-style sigma update,

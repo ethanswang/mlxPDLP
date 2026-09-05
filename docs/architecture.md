@@ -23,8 +23,9 @@ The solver:
 
 The implementation originated as a port of cuPDLPx, and the bundled
 `src/mps_parser.c` originated in that project. PSLP is an independent,
-Apache-2.0 dependency that CMake either finds as version 0.0.8 or fetches from
-its pinned `v0.0.8` tag.
+Apache-2.0 dependency that CMake either finds as version 0.0.11 or newer, or
+fetches from its pinned `v0.0.11` tag. Reused source checkouts are also checked
+against this minimum so an old build cache cannot silently bypass the upgrade.
 
 This document describes the current implementation by symbol rather than by
 line number so it remains useful as the source evolves.
@@ -94,7 +95,7 @@ dependencies are:
 - a C++20 compiler;
 - an MLX C++ library, either supplied by the user or privately bootstrapped by
   the source-level Makefile after explicit dependency-download approval;
-- PSLP 0.0.8 when `MLXPDLP_BUILD_PRESOLVE=ON`, supplied locally or obtained
+- PSLP 0.0.11 when `MLXPDLP_BUILD_PRESOLVE=ON`, supplied locally or obtained
   under that same approval;
 - Zlib when the bundled MPS parser is enabled;
 - Foundation, Metal, MetalKit, and Accelerate on macOS.
@@ -157,7 +158,7 @@ Available build options:
 | Option | Default | Effect |
 |---|---:|---|
 | `BUILD_TESTING` | `ON` | Builds and registers the available CTest targets |
-| `MLXPDLP_BUILD_PRESOLVE` | `ON` | Enables PSLP 0.0.8 presolve/postsolve support |
+| `MLXPDLP_BUILD_PRESOLVE` | `ON` | Enables PSLP 0.0.11 presolve/postsolve support |
 | `MLXPDLP_BUILD_MPS` | `ON` | Builds the bundled MPS loader and requires Zlib |
 | `MLXPDLP_BUILD_EXAMPLES` | `ON` | Builds Metal correctness, convergence, and acceleration examples |
 | `MLXPDLP_BUILD_BENCHMARKS` | `OFF` | Builds fixed-work and LPfeas Metal benchmarks |
@@ -478,6 +479,7 @@ post-Ruiz refresh is required).
 | `sv_tol` | `1e-4` |
 | `eps_optimal_relative` | `1e-4` |
 | `eps_feasible_relative` | `1e-4` |
+| `eps_infeasible_relative` | `1e-14` |
 | `time_sec_limit` | `3600` seconds |
 | `iteration_limit` | `INT32_MAX` |
 | `artificial_restart_threshold` | `0.36` |
@@ -545,7 +547,7 @@ them with the same factors applied by cuPDLPx, after which the normal Halpern
 anchors are initialized from the scaled starts. Non-finite entries are
 rejected.
 
-Warm starts and PSLP presolve cannot currently be combined: PSLP 0.0.8 does
+Warm starts and PSLP presolve cannot currently be combined: PSLP 0.0.11 does
 not expose mappings for projecting initial primal and dual iterates into the
 reduced problem. The constructor rejects that combination with
 `std::invalid_argument`; callers can set `params.presolve = false`.
@@ -894,17 +896,21 @@ unit inf-norm:
 Termination fires when the certificate gap is significant relative to the
 original problem data and the recession-cone residual is small relative to
 the gap, with residual ratios compared in consistent working units. The
-FP64 CPU path uses `eps_feasible_relative` for the ratio; the FP32 Metal
-path uses at least 1e-3 because FP32 ray arithmetic floors the attainable
-ratio. CPU and dense execution check certificates every evaluation block.
+ratio uses the independent `eps_infeasible_relative` parameter, default
+`1e-14`, on both CPU and Metal. It must be finite and positive. The
+original-unit gap must exceed `gap_tol * (1 + data_norm)`, where `gap_tol`
+is the requested certificate tolerance on CPU and at least `1e-3` on Metal.
+This separate FP32 significance guard does not relax the requested residual
+ratio. Increasing the certificate tolerance can recognize more approximate
+rays, at the risk of false infeasibility statuses on nearly infeasible models.
+CPU and dense execution check certificates every evaluation block.
 Sparse Metal checks the first block, then at a block boundary approximately
 every 1,000 iterations, and always on iteration/time-limit blocks; easy
 certificates therefore retain first-block termination while routine blocks
 avoid two extra SpMVs. Both rays and all six certificate reductions share one
-lazy evaluation and one host synchronization. Both reference implementations
-are more conservative: cuPDLPx
-computes ray metrics but never calls its criteria, and HPR-LP-C relies
-entirely on PSLP presolve for infeasibility proofs.
+lazy evaluation and one host synchronization. cuPDLPx now also enables its
+ray termination criteria with a separate `1e-14` default (#106); HPR-LP-C
+relies on PSLP presolve for infeasibility proofs.
 
 Timing uses `std::chrono::steady_clock` and is stored in
 `cumulative_time_sec`.
@@ -982,7 +988,7 @@ CTest registers:
 | `netlib_convergence_example` | Netlib ADLITTLE convergence sweep and published-objective check |
 | `mlx_basic` | Basic MLX CPU array operations |
 | `solver` | Solver, warm-start, presolve, postsolve, termination, and FP64 Farkas infeasibility-certificate regressions |
-| `device_comparison` | Analytic and sparse LPs on CPU and GPU, fused/unfused iteration agreement across all three SpMV strategies, SIMD-group threshold override, FP32 Metal infeasibility certificates, and sparse-Metal certificate cadence |
+| `device_comparison` | Analytic and sparse LPs on CPU and GPU, fused/unfused iteration agreement across all three SpMV strategies, SIMD-group threshold override, infeasibility tolerance independence and false-status regressions on CPU/Metal, FP32 Metal infeasibility certificates, and sparse-Metal certificate cadence |
 | `mps_device_comparison` | Bundled Netlib ADLITTLE MPS on CPU and GPU |
 | `netlib_regression_cpu` | Opt-in downloaded 40-case Netlib audit on CPU FP64 |
 | `netlib_regression_metal` | Opt-in downloaded 40-case Netlib audit on Metal FP32 |
@@ -1043,7 +1049,7 @@ back to the original cuPDLPx checkout.
    on poorly scaled LPs; CPU FP64 is the reliability fallback. FP32 ray
    arithmetic also limits infeasibility certification to cleaner rays on
    Metal (the FP64 CPU path certifies the pathological cases).
-2. **Warm-start/presolve exclusivity.** PSLP 0.0.8 does not expose an initial
+2. **Warm-start/presolve exclusivity.** PSLP 0.0.11 does not expose an initial
    iterate mapping, so callers must choose one feature per solve.
 3. **Fused kernels cover the sparse Metal path only.** Dense-fallback and
    CPU problems still use the unfused MLX-expression formulation.

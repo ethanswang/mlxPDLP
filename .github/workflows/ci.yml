@@ -40,7 +40,7 @@ jobs:
             _deps/mlx-install
             build/_deps/pslp-src
             build/_deps/pslp-build
-          key: native-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.key }}-mlx-25616a0a6acf-pslp-0.0.8-macos-${{ env.MLXPDLP_MACOS_DEPLOYMENT_TARGET }}-v2
+          key: native-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.key }}-mlx-25616a0a6acf-pslp-0.0.11-macos-${{ env.MLXPDLP_MACOS_DEPLOYMENT_TARGET }}-v2
 
       - name: Bootstrap native dependencies on cache miss
         if: steps.native-deps.outputs.cache-hit != 'true'

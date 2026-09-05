@@ -256,6 +256,7 @@ void mlxpdlp_set_default_parameters(pdhg_parameters_t *p) {
     p->sv_tol = 1e-4;
     p->termination_criteria.eps_optimal_relative = 1e-4;
     p->termination_criteria.eps_feasible_relative = 1e-4;
+    p->termination_criteria.eps_infeasible_relative = 1e-14;
     p->termination_criteria.time_sec_limit = 3600.0;
     p->termination_criteria.iteration_limit = INT32_MAX;
     // Feasibility polishing is an internal certificate-improvement phase. Its
@@ -403,6 +404,11 @@ MlxPdlpSolver::MlxPdlpSolver(int num_vars, int num_cons, const int *csr_row_ptr,
         params_ = *params;
     else
         set_default_parameters(&params_);
+
+    if (!std::isfinite(params_.termination_criteria.eps_infeasible_relative) ||
+        params_.termination_criteria.eps_infeasible_relative <= 0.0) {
+        throw std::invalid_argument("eps_infeasible_relative must be finite and positive");
+    }
 
     if (num_vars < 0 || num_cons < 0 || !csr_row_ptr) {
         throw std::invalid_argument("invalid LP dimensions or CSR row pointers");
@@ -3563,12 +3569,14 @@ bool MlxPdlpSolver::mlx_check_termination(bool full_evaluation) {
     // relative to the problem data, and the recession-cone residual small
     // relative to the gap. On feasible problems the dual-ray gap is <= 0 for
     // every y by weak duality, so only fp noise could trip it, and the
-    // significance floor absorbs that noise. FP32 ray arithmetic floors the
-    // attainable residual ratio near 1e-3, so the Metal path uses that relaxed
-    // threshold while the FP64 CPU path keeps the requested feasibility
-    // tolerance.
-    const double infeas_tol =
-        s_.cpu_double_precision_active ? feas_tol : std::max(feas_tol, 1e-3);
+    // significance floor absorbs that noise. Honor the independent requested
+    // residual ratio on both devices: silently relaxing it on Metal can turn
+    // an approximate ray into a false infeasibility status. Keep a separate
+    // FP32 gap floor, since even an exactly zero computed ray residual cannot
+    // validate a separation gap at the level of roundoff.
+    const double infeas_tol = tc.eps_infeasible_relative;
+    const double gap_tol =
+        s_.cpu_double_precision_active ? infeas_tol : std::max(infeas_tol, 1e-3);
     // Sparse Metal certificate checks carry two additional SpMVs. Check the
     // first block so easy certificates still terminate immediately, then at a
     // bounded iteration cadence. A limit block is always checked to preserve
@@ -3592,14 +3600,14 @@ bool MlxPdlpSolver::mlx_check_termination(bool full_evaluation) {
         // Significance floors use the original-unit gaps; the residual ratio
         // tests use the working-unit gaps so both sides share units.
         if (s_.dual_ray_objective >
-                infeas_tol * (1.0 + s_.constraint_bound_norm) &&
+                gap_tol * (1.0 + s_.constraint_bound_norm) &&
             s_.max_dual_ray_infeasibility <=
                 infeas_tol * working_dual_ray_objective_) {
             s_.termination_reason = TERMINATION_REASON_PRIMAL_INFEASIBLE;
             return true;
         }
         if (s_.primal_ray_linear_objective <
-                -infeas_tol * (1.0 + s_.objective_vector_norm) &&
+                -gap_tol * (1.0 + s_.objective_vector_norm) &&
             s_.max_primal_ray_infeasibility <=
                 -infeas_tol * working_primal_ray_objective_) {
             s_.termination_reason = TERMINATION_REASON_DUAL_INFEASIBLE;
@@ -3788,10 +3796,11 @@ void MlxPdlpSolver::mlx_display_header() {
         printf("Dense MLX matmul fallback for SpMV (A = %.1f MB)\n",
                static_cast<double>(s_.m) * s_.n * sizeof(float) / 1e6);
     }
-    printf("Parameters: eps_opt=%.1e eps_feas=%.1e eval_freq=%d "
+    printf("Parameters: eps_opt=%.1e eps_feas=%.1e eps_infeas=%.1e eval_freq=%d "
            "time_limit=%.0fs iter_limit=%d\n",
            params_.termination_criteria.eps_optimal_relative,
            params_.termination_criteria.eps_feasible_relative,
+           params_.termination_criteria.eps_infeasible_relative,
            params_.termination_evaluation_frequency, params_.termination_criteria.time_sec_limit,
            params_.termination_criteria.iteration_limit);
     printf("%8s %14s %14s %14s %14s %14s %12s %12s\n", "Iter", "PrimalRes",

@@ -49,6 +49,9 @@ def test_version():
 def test_parameters_defaults_and_roundtrip():
     p = mlxpdlp.Parameters()
     assert p.presolve is True
+    assert p.termination_criteria.eps_infeasible_relative == 1e-14
+    assert mlxpdlp.TerminationCriteria().eps_infeasible_relative == 1e-14
+    p.termination_criteria.eps_infeasible_relative = 1e-6
     assert p.geometric_mean_iterations == 12
     p.geometric_mean_iterations = 3
     assert p.geometric_mean_iterations == 3
@@ -56,6 +59,7 @@ def test_parameters_defaults_and_roundtrip():
     assert p.termination_criteria.eps_optimal_relative == 1e-5
     assert p.termination_criteria.eps_feasible_relative == 1e-5
     assert p.termination_criteria.eps_feas_polish_relative <= 1e-6
+    assert p.termination_criteria.eps_infeasible_relative == 1e-6
     p.iteration_limit = 1234
     assert p.termination_criteria.iteration_limit == 1234
     p.time_limit_seconds = 12.5
@@ -166,6 +170,14 @@ def test_invalid_inputs():
     parameters = mlxpdlp.Parameters()
     parameters.geometric_mean_iterations = -1
     with pytest.raises(ValueError, match="geometric_mean_iterations"):
+        solve_small(parameters=parameters)
+
+
+@pytest.mark.parametrize("tolerance", [0.0, -1e-6, np.nan, np.inf, -np.inf])
+def test_invalid_infeasibility_tolerance(tolerance):
+    parameters = mlxpdlp.Parameters()
+    parameters.termination_criteria.eps_infeasible_relative = tolerance
+    with pytest.raises(ValueError, match="eps_infeasible_relative"):
         solve_small(parameters=parameters)
 
 

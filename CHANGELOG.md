@@ -10,6 +10,10 @@ and the project intends to follow
 
 ### Added
 
+- Independent `eps_infeasible_relative` in the C++ and Python termination
+  criteria, defaulting to cuPDLPx's `1e-14` on CPU and Metal. The requested
+  ray residual ratio is honored without Metal relaxation; the separate
+  FP32 separation-gap significance guard remains in place.
 - Convergence-aware, cuOpt Stable3-inspired conditional termination
   checkpoints (`conditional_termination_evaluation`, enabled by default): a
   Metal-adapted midpoint check is used only near tolerance and only for working
@@ -27,8 +31,7 @@ and the project intends to follow
 - Active infeasibility/unboundedness termination through Farkas separation
   ray certificates (primal ray for dual infeasibility, dual ray for primal
   infeasibility), with significance floors and unit-consistent residual
-  ratio tests; the FP32 Metal path uses a relaxed ratio threshold to match
-  its arithmetic floor.
+  ratio tests.
 - Absolute-value objective-gap comparisons in every optimality check so a
   numerically negative gap cannot pass one-sided comparisons.
 - Device-tuned SpMV SIMD-group dispatch threshold (scaled by GPU family,
@@ -42,6 +45,10 @@ and the project intends to follow
 
 ### Changed
 
+- Upgrade PSLP from 0.0.8 to 0.0.11 for parallel-row bound preservation,
+  nonvertex reduced-cost reconstruction, objective-cancellation fixes, and
+  early release of the presolve transpose. Build, bootstrap, installed-package
+  requirements, and CI caches now use 0.0.11; old source caches are rejected.
 - PDHG evaluation blocks now stop exactly at the configured iteration limit and
   use the cheaper minor fused kernel for their first iteration unless a restart
   needs a new fixed-point baseline, avoiding discarded major snapshots.

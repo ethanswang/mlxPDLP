@@ -19,7 +19,7 @@ list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
 
 find_dependency(MLX MODULE)
 if(@MLXPDLP_BUILD_PRESOLVE@)
-    find_dependency(PSLP 0.0.8 CONFIG)
+    find_dependency(PSLP 0.0.11 CONFIG)
 endif()
 if(@MLXPDLP_BUILD_MPS@)
     find_dependency(ZLIB)

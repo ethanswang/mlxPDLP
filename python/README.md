@@ -30,7 +30,7 @@ CMAKE_ARGS=-DMLXPDLP_ALLOW_DOWNLOADS=ON \
   MLX_BUILD_DIR=/absolute/path/to/mlx/build pip install .
 ```
 
-PSLP 0.0.8 is downloaded only when presolve support is enabled (default) and
+PSLP 0.0.11 is downloaded only when presolve support is enabled (default) and
 `MLXPDLP_ALLOW_DOWNLOADS=ON` explicitly permits it. For an offline build, reuse
 an existing checkout with `FETCHCONTENT_SOURCE_DIR_PSLP=/path/to/pslp-src`
 alongside the MLX path shown above.
@@ -81,6 +81,7 @@ device = "gpu" if mlxpdlp.has_gpu() else "cpu"
 ```python
 params = mlxpdlp.Parameters()
 params.tolerance = 1e-4          # optimality + feasibility tolerances
+params.termination_criteria.eps_infeasible_relative = 1e-14  # independent
 params.time_limit_seconds = 60.0
 params.iteration_limit = 100000
 params.verbose = True
@@ -89,6 +90,12 @@ params.presolve = True           # PSLP presolve (default); disable to use
 params.geometric_mean_iterations = 12  # default; set 0 to disable
 solver = mlxpdlp.Solver(..., parameters=params, device="cpu")
 ```
+
+`eps_infeasible_relative` must be finite and positive. It controls the
+ray-certificate residual ratio on both devices and is not changed by
+`params.tolerance`. The strict default favors avoiding false infeasibility
+statuses; a value such as `1e-6` admits less accurate rays. Metal retains a
+separate guard against separation gaps near its arithmetic floor.
 
 Warm starts use the original, unscaled problem coordinates and require
 `params.presolve = False`:
