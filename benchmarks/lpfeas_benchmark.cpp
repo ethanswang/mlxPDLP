@@ -18,6 +18,7 @@ limitations under the License.
 Run the public LPfeas instances with the published cuPDLPx-style protocol and
 independently validate returned solutions on the original model in float64.
 */
+#include "benchmark_provenance.h"
 #include "lpfeas_support.h"
 
 #include "mlxPDLP/mps_loader.h"
@@ -135,6 +136,9 @@ struct Options {
     bool warm_start_correction = true;
     bool retry_without_presolve = true;
     bool retry_without_curtis_reid = true;
+    bool retry_restart_policy = true;
+    bool conservative_step_size = false;
+    bool host_double_residual_evaluation = false;
     bool verbose = false;
     bool warm_up = true;
     bool fail_on_validation = false;
@@ -249,6 +253,9 @@ struct RunRecord {
     bool restart_policy_fallback_attempted = false;
     std::string restart_policy_fallback_reason;
     int selected_curtis_reid_iterations = 0;
+    int selected_restart_policy = 0;
+    int step_size_reductions = 0;
+    int host_double_audit_count = 0;
     int rows = 0;
     int columns = 0;
     int nonzeros = 0;
@@ -449,6 +456,10 @@ void print_usage(const char *program) {
         "  --no-warm-start-correction  Do not reuse an aggressively presolved primal point\n"
         "  --no-presolve-retry         Do not retry a failed postsolve audit without PSLP\n"
         "  --no-scaling-retry          Do not retry a failed audit without Curtis-Reid\n"
+        "  --no-restart-policy-retry   Do not retry failed PID audits with HPR\n"
+        "  --conservative-step-size   Start with a matrix-norm upper bound\n"
+        "  --host-double-residual-evaluation  Enable periodic FP64 feedback\n"
+        "  --no-host-double-residual-evaluation  Disable periodic FP64 feedback (default)\n"
         "  --cold-start                Include first Metal kernel compilation\n"
         "  --fail-on-validation        Exit nonzero if float64 verification fails\n"
         "  --verbose                   Enable solver iteration logs\n"
@@ -570,6 +581,14 @@ Options parse_options(int argc, char **argv) {
             options.retry_without_presolve = false;
         else if (argument == "--no-scaling-retry")
             options.retry_without_curtis_reid = false;
+        else if (argument == "--no-restart-policy-retry")
+            options.retry_restart_policy = false;
+        else if (argument == "--conservative-step-size")
+            options.conservative_step_size = true;
+        else if (argument == "--host-double-residual-evaluation")
+            options.host_double_residual_evaluation = true;
+        else if (argument == "--no-host-double-residual-evaluation")
+            options.host_double_residual_evaluation = false;
         else if (argument == "--cold-start")
             options.warm_up = false;
         else if (argument == "--fail-on-validation")
@@ -583,6 +602,8 @@ Options parse_options(int argc, char **argv) {
             throw std::invalid_argument("unknown option: " + argument);
         }
     }
+    if (options.restart_policy > 1)
+        throw std::invalid_argument("restart policy must be 0 (PID) or 1 (HPR)");
     if (options.evaluation_frequency < 2)
         throw std::invalid_argument("evaluation frequency must be at least 2");
     if (!options.manifest)
@@ -816,31 +837,67 @@ void warm_up_metal() {
         row_ptr[static_cast<size_t>(row) + 1] =
             static_cast<int>(col_ind.size());
     }
-    std::vector<double> variable_lb(columns, 0.0);
-    std::vector<double> variable_ub(columns, 1.0);
-    std::vector<double> constraint_lb(rows, 0.0);
-    std::vector<double> constraint_ub(rows, 1.0);
-    std::vector<double> objective(columns, 1.0);
-    pdhg_parameters_t parameters;
-    mlxpdlp_set_default_parameters(&parameters);
-    parameters.verbose = false;
-    parameters.presolve = false;
-    parameters.termination_evaluation_frequency = 2;
-    parameters.termination_criteria.eps_optimal_relative = 0.0;
-    parameters.termination_criteria.eps_feasible_relative = 0.0;
-    parameters.termination_criteria.iteration_limit = 2;
-    parameters.termination_criteria.time_sec_limit = 60.0;
-    parameters.sv_max_iter = 2;
-    MlxPdlpSolver solver(columns, rows, row_ptr.data(), col_ind.data(), values.data(),
-                         variable_lb.data(), variable_ub.data(), constraint_lb.data(),
-                         constraint_ub.data(), objective.data(), 0.0, &parameters,
-                         mx::Device::gpu);
-    if (!solver.expects_sparse_metal_backend())
-        throw std::runtime_error("Metal warmup did not select the sparse backend");
-    ResultPtr result(solver.solve(), mlxpdlp_result_free);
-    mx::synchronize(solver.state().stream);
-    if (!solver.state().sparse_metal_active || !result)
-        throw std::runtime_error("Metal sparse warmup failed");
+    auto run = [](int rows, int columns, const std::vector<int> &row_ptr,
+                  const std::vector<int> &col_ind, const std::vector<double> &values) {
+        std::vector<double> variable_lb(columns, 0.0);
+        std::vector<double> variable_ub(columns, 1.0);
+        std::vector<double> constraint_lb(rows, 0.0);
+        std::vector<double> constraint_ub(rows, 1.0);
+        std::vector<double> objective(columns, 1.0);
+        pdhg_parameters_t parameters;
+        mlxpdlp_set_default_parameters(&parameters);
+        parameters.verbose = false;
+        parameters.presolve = false;
+        parameters.termination_evaluation_frequency = 2;
+        parameters.termination_criteria.eps_optimal_relative = 0.0;
+        parameters.termination_criteria.eps_feasible_relative = 0.0;
+        parameters.termination_criteria.iteration_limit = 2;
+        parameters.termination_criteria.time_sec_limit = 60.0;
+        parameters.sv_max_iter = 2;
+        MlxPdlpSolver solver(columns, rows, row_ptr.data(), col_ind.data(), values.data(),
+                             variable_lb.data(), variable_ub.data(), constraint_lb.data(),
+                             constraint_ub.data(), objective.data(), 0.0, &parameters,
+                             mx::Device::gpu);
+        if (!solver.expects_sparse_metal_backend())
+            throw std::runtime_error("Metal warmup did not select the sparse backend");
+        ResultPtr result(solver.solve(), mlxpdlp_result_free);
+        mx::synchronize(solver.state().stream);
+        if (!solver.state().sparse_metal_active || !result)
+            throw std::runtime_error("Metal sparse warmup failed");
+    };
+    run(rows, columns, row_ptr, col_ind, values);
+
+    // Prime the opposite scalar/adaptive orientation as well. A^T uses the
+    // primal half-step kernels, so warming only A's strategy misses variants.
+    std::vector<int> transpose_rows(columns + 1, 0), transpose_columns(col_ind.size());
+    std::vector<double> transpose_values(values.size());
+    for (int column : col_ind)
+        ++transpose_rows[column + 1];
+    for (int column = 0; column < columns; ++column)
+        transpose_rows[column + 1] += transpose_rows[column];
+    auto next = transpose_rows;
+    for (int row = 0; row < rows; ++row) {
+        for (int entry = row_ptr[row]; entry < row_ptr[row + 1]; ++entry) {
+            const int index = next[col_ind[entry]]++;
+            transpose_columns[index] = row;
+            transpose_values[index] = values[entry];
+        }
+    }
+    run(columns, rows, transpose_rows, transpose_columns, transpose_values);
+
+    // Both orientations select SIMD-group SpMV and fused half-steps here.
+    constexpr int uniform_size = 512, row_length = 96;
+    std::vector<int> uniform_rows(uniform_size + 1), uniform_columns;
+    std::vector<double> uniform_values;
+    for (int row = 0; row < uniform_size; ++row) {
+        uniform_rows[row] = static_cast<int>(uniform_values.size());
+        for (int offset = 0; offset < row_length; ++offset) {
+            uniform_columns.push_back((row + offset) % uniform_size);
+            uniform_values.push_back(1.0);
+        }
+    }
+    uniform_rows[uniform_size] = static_cast<int>(uniform_values.size());
+    run(uniform_size, uniform_size, uniform_rows, uniform_columns, uniform_values);
 }
 
 double validation_merit(const RunRecord &record) {
@@ -876,6 +933,7 @@ RunRecord run_attempt(const ManifestEntry &entry, const fs::path &instance_path,
     record.selected_warm_start = primal_start != nullptr || dual_start != nullptr ||
                                  reduced_cost_start != nullptr;
     record.selected_curtis_reid_iterations = curtis_reid_iterations;
+    record.selected_restart_policy = options.restart_policy;
     record.attempts = 1;
 
     pdhg_parameters_t parameters;
@@ -893,6 +951,8 @@ RunRecord run_attempt(const ManifestEntry &entry, const fs::path &instance_path,
     parameters.geometric_mean_iterations = options.geometric_mean_iterations;
     parameters.curtis_reid_iterations = curtis_reid_iterations;
     parameters.restart_policy = options.restart_policy;
+    parameters.conservative_step_size = options.conservative_step_size;
+    parameters.host_double_residual_evaluation = options.host_double_residual_evaluation;
     parameters.l_inf_ruiz_iterations = 10;
     parameters.has_pock_chambolle_alpha = true;
     parameters.pock_chambolle_alpha = 1.0;
@@ -958,6 +1018,8 @@ RunRecord run_attempt(const ManifestEntry &entry, const fs::path &instance_path,
     record.reduced_columns = presolve ? result->num_reduced_variables : result->num_variables;
     record.reduced_nonzeros = presolve ? result->num_reduced_nonzeros : result->num_nonzeros;
     record.iterations = result->total_count;
+    record.step_size_reductions = solver.state().step_size_reductions;
+    record.host_double_audit_count = solver.state().host_double_audit_count;
     record.feasibility_iterations = result->feasibility_iteration;
     record.host_double_iterations = result->host_double_polishing_iteration;
     record.host_double_handoff = result->host_double_handoff;
@@ -1340,7 +1402,7 @@ RunRecord run_instance(const ManifestEntry &entry, Options options) {
         // sigma update explores a different restart path; re-run the
         // portfolio with it when the cuPDLPx PID portfolio fails the
         // original-model float64 audit.
-        if (!record.verified && options.restart_policy == 0) {
+        if (!record.verified && options.restart_policy == 0 && options.retry_restart_policy) {
             restart_policy_fallback_attempted = true;
             // The warm-start correction gate is per-family: the PID family
             // may have consumed it, but the HPR family benefits from the
@@ -1449,14 +1511,18 @@ RunRecord run_instance(const ManifestEntry &entry, Options options) {
 }
 
 void write_csv_header(std::ostream &output) {
-    output << "name,worker_id,completion_order,termination,verified,attempts,selected_presolve,selected_primal_propagation,selected_warm_start,selected_cr_iterations,"
+    output << "name,worker_id,completion_order,termination,verified,attempts,selected_presolve,"
+              "selected_primal_propagation,selected_warm_start,selected_cr_iterations,selected_"
+              "restart_policy,step_size_reductions,host_double_audit_count,"
               "fallback_attempted,fallback_reason,propagation_fallback_attempted,"
               "propagation_fallback_reason,warm_start_correction_attempted,"
               "warm_start_correction_reason,host_handoff_maturity_retry_attempted,"
               "host_handoff_maturity_retry_reason,scaling_fallback_attempted,"
               "scaling_fallback_reason,restart_policy_fallback_attempted,"
-              "restart_policy_fallback_reason,error,validation_warning,rows,columns,nonzeros,reduced_rows,"
-              "reduced_columns,reduced_nonzeros,iterations,feasibility_iterations,host_double_iterations,host_double_handoff,sparse_metal,sparse_cpu,cpu_double_precision,"
+              "restart_policy_fallback_reason,error,validation_warning,rows,columns,nonzeros,"
+              "reduced_rows,"
+              "reduced_columns,reduced_nonzeros,iterations,feasibility_iterations,host_double_"
+              "iterations,host_double_handoff,sparse_metal,sparse_cpu,cpu_double_precision,"
               "parse_seconds,setup_seconds,presolve_seconds,rescaling_seconds,"
               "feasibility_polishing_seconds,host_double_polishing_seconds,solve_seconds,"
               "solver_reported_seconds,verification_seconds,total_seconds,"
@@ -1474,7 +1540,8 @@ void write_csv_record(std::ostream &output, const RunRecord &record) {
            << (record.selected_presolve ? "true" : "false") << ','
            << (record.selected_primal_propagation ? "true" : "false") << ','
            << (record.selected_warm_start ? "true" : "false") << ','
-           << record.selected_curtis_reid_iterations << ','
+           << record.selected_curtis_reid_iterations << ',' << record.selected_restart_policy << ','
+           << record.step_size_reductions << ',' << record.host_double_audit_count << ','
            << (record.fallback_attempted ? "true" : "false") << ','
            << csv_escape(record.fallback_reason) << ','
            << (record.propagation_fallback_attempted ? "true" : "false") << ','
@@ -1486,26 +1553,21 @@ void write_csv_record(std::ostream &output, const RunRecord &record) {
            << (record.scaling_fallback_attempted ? "true" : "false") << ','
            << csv_escape(record.scaling_fallback_reason) << ','
            << (record.restart_policy_fallback_attempted ? "true" : "false") << ','
-           << csv_escape(record.restart_policy_fallback_reason) << ','
-           << csv_escape(record.error) << ','
-           << csv_escape(record.validation_warning) << ',' << record.rows << ',' << record.columns
-           << ',' << record.nonzeros << ','
-           << record.reduced_rows << ',' << record.reduced_columns << ','
-           << record.reduced_nonzeros << ',' << record.iterations << ','
-           << record.feasibility_iterations << ',' << record.host_double_iterations << ','
+           << csv_escape(record.restart_policy_fallback_reason) << ',' << csv_escape(record.error)
+           << ',' << csv_escape(record.validation_warning) << ',' << record.rows << ','
+           << record.columns << ',' << record.nonzeros << ',' << record.reduced_rows << ','
+           << record.reduced_columns << ',' << record.reduced_nonzeros << ',' << record.iterations
+           << ',' << record.feasibility_iterations << ',' << record.host_double_iterations << ','
            << (record.host_double_handoff ? "true" : "false") << ','
            << (record.sparse_metal ? "true" : "false") << ','
            << (record.sparse_cpu ? "true" : "false") << ','
-           << (record.cpu_double_precision ? "true" : "false") << ','
-           << std::setprecision(17)
-           << record.parse_seconds << ',' << record.setup_seconds << ','
-           << record.presolve_seconds << ',' << record.rescaling_seconds << ','
-           << record.feasibility_polishing_seconds << ','
-           << record.host_double_polishing_seconds << ','
-           << record.solve_seconds << ',' << record.solver_reported_seconds << ','
-           << record.verification_seconds << ',' << record.total_seconds << ','
-           << record.original_primal_objective << ',' << record.original_dual_objective << ','
-           << record.objective_without_constant << ','
+           << (record.cpu_double_precision ? "true" : "false") << ',' << std::setprecision(17)
+           << record.parse_seconds << ',' << record.setup_seconds << ',' << record.presolve_seconds
+           << ',' << record.rescaling_seconds << ',' << record.feasibility_polishing_seconds << ','
+           << record.host_double_polishing_seconds << ',' << record.solve_seconds << ','
+           << record.solver_reported_seconds << ',' << record.verification_seconds << ','
+           << record.total_seconds << ',' << record.original_primal_objective << ','
+           << record.original_dual_objective << ',' << record.objective_without_constant << ','
            << record.dual_objective_without_constant << ','
            << record.validation.relative_primal_residual << ','
            << record.validation.relative_dual_residual << ','
@@ -1548,26 +1610,26 @@ void write_json(const fs::path &path, const Options &options,
     std::ofstream output(temporary, std::ios::trunc);
     if (!output)
         throw std::runtime_error("cannot write JSON report: " + temporary.string());
-    output << "{\n  \"schema_version\": 8,\n"
+    output << "{\n  \"schema_version\": 9,\n"
            << "  \"generated_at_utc\": \"" << json_escape(generated_at) << "\",\n"
            << "  \"solver\": \"mlxPDLP " << MLXPDLP_VERSION_STRING << "\",\n"
-           << "  \"suite\": \""
-           << (is_netlib_suite(options) ? "netlib" : "lpfeas") << "\",\n"
-           << "  \"host\": {\"name\": \"" << json_escape(host_name())
-           << "\", \"os\": \"" << json_escape(os_description())
-           << "\", \"hardware_model\": \"" << json_escape(hardware_model())
+           << "  \"build\": {\"git_revision\": \"" << MLXPDLP_BENCHMARK_GIT_REVISION
+           << "\", \"git_dirty\": " << MLXPDLP_BENCHMARK_GIT_DIRTY << ", \"source_sha256\": \""
+           << MLXPDLP_BENCHMARK_SOURCE_SHA256 << "\", \"mlx_git_revision\": \""
+           << MLXPDLP_BENCHMARK_MLX_REVISION << "\"},\n"
+           << "  \"suite\": \"" << (is_netlib_suite(options) ? "netlib" : "lpfeas") << "\",\n"
+           << "  \"host\": {\"name\": \"" << json_escape(host_name()) << "\", \"os\": \""
+           << json_escape(os_description()) << "\", \"hardware_model\": \""
+           << json_escape(hardware_model())
            << "\", \"logical_cpus\": " << std::thread::hardware_concurrency() << "},\n"
            << "  \"protocol\": {\"device\": \"" << device_name(options.device)
-           << "\", \"arithmetic_precision\": \""
-           << arithmetic_precision_name(options.device)
-           << "\", \"jobs\": " << options.jobs
-           << ", \"job_selection\": \"" << (options.jobs_auto ? "auto" : "explicit")
-           << "\", \"auto_suite_policy\": \""
+           << "\", \"arithmetic_precision\": \"" << arithmetic_precision_name(options.device)
+           << "\", \"jobs\": " << options.jobs << ", \"job_selection\": \""
+           << (options.jobs_auto ? "auto" : "explicit") << "\", \"auto_suite_policy\": \""
            << (is_netlib_suite(options) ? "netlib_parallel" : "lpfeas_serial")
            << "\", \"scheduling\": \""
            << (options.jobs > 1 ? "work_stealing_lpt" : "manifest_order") << "\""
-           << ", \"presolve\": "
-           << (options.presolve ? "true" : "false")
+           << ", \"presolve\": " << (options.presolve ? "true" : "false")
            << ", \"presolve_primal_propagation\": "
            << (options.presolve_primal_propagation ? "true" : "false")
            << ", \"presolve_singleton_columns\": "
@@ -1578,11 +1640,9 @@ void write_json(const fs::path &path, const Options &options,
            << (options.presolve_parallel_rows ? "true" : "false")
            << ", \"presolve_parallel_columns\": "
            << (options.presolve_parallel_columns ? "true" : "false")
-           << ", \"presolve_dual_fix\": "
-           << (options.presolve_dual_fix ? "true" : "false")
+           << ", \"presolve_dual_fix\": " << (options.presolve_dual_fix ? "true" : "false")
            << ", \"presolve_finite_bound_tightening\": "
-           << (options.presolve_finite_bound_tightening ? "true" : "false")
-           << ", \"tolerance\": ";
+           << (options.presolve_finite_bound_tightening ? "true" : "false") << ", \"tolerance\": ";
     write_json_number(output, options.tolerance);
     output << ", \"solver_tolerance\": ";
     write_json_number(output, effective_solver_tolerance(options));
@@ -1597,22 +1657,25 @@ void write_json(const fs::path &path, const Options &options,
     output << ", \"correction_iteration_limit\": "
            << options.warm_start_correction_iteration_limit;
     output << ", \"time_limit_scope\": \"per_attempt\", \"iteration_limit\": "
-           << options.iteration_limit
+           << options.iteration_limit << ", \"restart_policy\": " << options.restart_policy
+           << ", \"restart_policy_retry\": " << (options.retry_restart_policy ? "true" : "false")
+           << ", \"conservative_step_size\": "
+           << (options.conservative_step_size ? "true" : "false")
+           << ", \"host_double_residual_evaluation\": "
+           << (options.host_double_residual_evaluation ? "true" : "false")
            << ", \"evaluation_frequency\": " << options.evaluation_frequency
            << ", \"conditional_termination_evaluation\": "
            << (options.conditional_termination_evaluation ? "true" : "false")
            << ", \"sv_max_iterations\": " << options.singular_value_iterations
            << ", \"sparse_cpu_dense_element_threshold\": 16777216"
-           << ", \"geometric_mean_iterations\": "
-           << options.geometric_mean_iterations
+           << ", \"geometric_mean_iterations\": " << options.geometric_mean_iterations
            << ", \"curtis_reid_iterations\": " << options.curtis_reid_iterations
            << ", \"ruiz_iterations\": 10, "
               "\"pock_chambolle_alpha\": 1.0, "
               "\"bound_objective_rescaling\": true, \"optimality_norm\": \"L2\", "
               "\"feasibility_polishing\": "
            << (options.feasibility_polishing ? "true" : "false")
-           << ", \"host_double_polishing\": "
-           << (options.host_double_polishing ? "true" : "false")
+           << ", \"host_double_polishing\": " << (options.host_double_polishing ? "true" : "false")
            << ", \"host_double_early_handoff\": "
            << (options.host_double_early_handoff ? "true" : "false")
            << ", \"host_double_early_handoff_effective\": "
@@ -1640,23 +1703,18 @@ void write_json(const fs::path &path, const Options &options,
     output << "},\n  \"results\": [\n";
     for (size_t index = 0; index < records.size(); ++index) {
         const RunRecord &record = records[index];
-        output << "    {\"name\": \"" << json_escape(record.manifest.name)
-               << "\", \"path\": \"" << json_escape(record.path)
-               << "\", \"worker_id\": " << record.worker_id
-               << ", \"completion_order\": " << record.completion_order
-               << ", \"termination\": \"" << record.termination
-               << "\", \"verified\": " << (record.verified ? "true" : "false")
+        output << "    {\"name\": \"" << json_escape(record.manifest.name) << "\", \"path\": \""
+               << json_escape(record.path) << "\", \"worker_id\": " << record.worker_id
+               << ", \"completion_order\": " << record.completion_order << ", \"termination\": \""
+               << record.termination << "\", \"verified\": " << (record.verified ? "true" : "false")
                << ", \"attempts\": " << record.attempts
-               << ", \"selected_presolve\": "
-               << (record.selected_presolve ? "true" : "false")
+               << ", \"selected_presolve\": " << (record.selected_presolve ? "true" : "false")
                << ", \"selected_primal_propagation\": "
                << (record.selected_primal_propagation ? "true" : "false")
-               << ", \"selected_warm_start\": "
-               << (record.selected_warm_start ? "true" : "false")
+               << ", \"selected_warm_start\": " << (record.selected_warm_start ? "true" : "false")
                << ", \"selected_curtis_reid_iterations\": "
                << record.selected_curtis_reid_iterations
-               << ", \"fallback_attempted\": "
-               << (record.fallback_attempted ? "true" : "false")
+               << ", \"fallback_attempted\": " << (record.fallback_attempted ? "true" : "false")
                << ", \"fallback_reason\": \"" << json_escape(record.fallback_reason) << "\""
                << ", \"propagation_fallback_attempted\": "
                << (record.propagation_fallback_attempted ? "true" : "false")
@@ -1672,29 +1730,29 @@ void write_json(const fs::path &path, const Options &options,
                << json_escape(record.host_handoff_maturity_retry_reason) << "\""
                << ", \"scaling_fallback_attempted\": "
                << (record.scaling_fallback_attempted ? "true" : "false")
-               << ", \"scaling_fallback_reason\": \""
-               << json_escape(record.scaling_fallback_reason) << "\""
+               << ", \"scaling_fallback_reason\": \"" << json_escape(record.scaling_fallback_reason)
+               << "\""
+               << ", \"selected_restart_policy\": " << record.selected_restart_policy
+               << ", \"step_size_reductions\": " << record.step_size_reductions
+               << ", \"host_double_audit_count\": " << record.host_double_audit_count
                << ", \"restart_policy_fallback_attempted\": "
                << (record.restart_policy_fallback_attempted ? "true" : "false")
                << ", \"restart_policy_fallback_reason\": \""
                << json_escape(record.restart_policy_fallback_reason) << "\""
-               << ", \"error\": \"" << json_escape(record.error)
-               << "\", \"validation_warning\": \""
+               << ", \"error\": \"" << json_escape(record.error) << "\", \"validation_warning\": \""
                << json_escape(record.validation_warning) << "\", "
                << "\"dimensions\": {\"rows\": " << record.rows
-               << ", \"columns\": " << record.columns << ", \"nonzeros\": "
-               << record.nonzeros << ", \"reduced_rows\": " << record.reduced_rows
+               << ", \"columns\": " << record.columns << ", \"nonzeros\": " << record.nonzeros
+               << ", \"reduced_rows\": " << record.reduced_rows
                << ", \"reduced_columns\": " << record.reduced_columns
                << ", \"reduced_nonzeros\": " << record.reduced_nonzeros << "}, "
                << "\"iterations\": " << record.iterations
                << ", \"feasibility_iterations\": " << record.feasibility_iterations
                << ", \"host_double_iterations\": " << record.host_double_iterations
-               << ", \"host_double_handoff\": "
-               << (record.host_double_handoff ? "true" : "false")
+               << ", \"host_double_handoff\": " << (record.host_double_handoff ? "true" : "false")
                << ", \"sparse_metal\": " << (record.sparse_metal ? "true" : "false")
                << ", \"sparse_cpu\": " << (record.sparse_cpu ? "true" : "false")
-               << ", \"cpu_double_precision\": "
-               << (record.cpu_double_precision ? "true" : "false")
+               << ", \"cpu_double_precision\": " << (record.cpu_double_precision ? "true" : "false")
                << ", \"timing_seconds\": {\"parse\": ";
         write_json_number(output, record.parse_seconds);
         output << ", \"setup\": ";
@@ -1872,6 +1930,7 @@ int main(int argc, char **argv) {
                 work_order[position]);
         }
 
+        std::mutex metal_warmup_mutex;
         std::mutex report_mutex;
         std::mutex exception_mutex;
         std::vector<std::optional<RunRecord>> result_slots(entries.size());
@@ -1984,8 +2043,13 @@ int main(int argc, char **argv) {
             workers.emplace_back([&, worker_index] {
                 bool warmup_ok = true;
                 try {
-                    if (options.device == DeviceSelection::metal && options.warm_up)
+                    if (options.device == DeviceSelection::metal && options.warm_up) {
+                        // MLX custom-kernel caches can insert library entries
+                        // under a shared lock on first use. Prime all variants
+                        // serially; timed work still runs on parallel streams.
+                        std::lock_guard<std::mutex> lock(metal_warmup_mutex);
                         warm_up_metal();
+                    }
                 } catch (...) {
                     warmup_ok = false;
                     capture_worker_exception(std::current_exception());

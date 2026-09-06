@@ -69,6 +69,13 @@ def test_parameters_defaults_and_roundtrip():
     assert p.conditional_termination_evaluation is True
     p.conditional_termination_evaluation = False
     assert p.conditional_termination_evaluation is False
+    assert p.conservative_step_size is False
+    assert p.host_double_residual_evaluation is False
+    p.conservative_step_size = True
+    p.host_double_residual_evaluation = True
+    assert p.conservative_step_size is True
+    assert p.host_double_residual_evaluation is True
+    assert int(mlxpdlp.TerminationReason.NUMERICAL_ERROR) == 9
 
 
 def test_small_lp_cpu():

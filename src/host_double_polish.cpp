@@ -14,7 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include "cpu_sparse_matrix.h"
 #include "mlxPDLP/solver.h"
+#include "pdhg_control.h"
 
 #include <algorithm>
 #include <array>
@@ -327,28 +329,53 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
         apply_diagonal_scaling(row_update, column_update);
     }
 
-    // Build a transpose CSR once. Both sparse products then use contiguous row
-    // traversals and double accumulation throughout the continuation.
-    std::vector<int> transpose_row_ptr(static_cast<size_t>(n) + 1, 0);
-    for (int column : col_ind)
-        ++transpose_row_ptr[static_cast<size_t>(column) + 1];
-    for (int column = 0; column < n; ++column)
-        transpose_row_ptr[static_cast<size_t>(column) + 1] +=
-            transpose_row_ptr[static_cast<size_t>(column)];
-    std::vector<int> transpose_col_ind(static_cast<size_t>(nnz));
-    std::vector<double> transpose_values(static_cast<size_t>(nnz));
-    auto transpose_next = transpose_row_ptr;
-    for (int row = 0; row < m; ++row) {
-        for (int entry = row_ptr[static_cast<size_t>(row)];
-             entry < row_ptr[static_cast<size_t>(row + 1)]; ++entry) {
-            const int column = col_ind[static_cast<size_t>(entry)];
-            const int target = transpose_next[static_cast<size_t>(column)]++;
-            transpose_col_ind[static_cast<size_t>(target)] = row;
-            transpose_values[static_cast<size_t>(target)] = a[static_cast<size_t>(entry)];
+    // Native products amortize their dispatch costs on large matrices. The
+    // retained LPfeas probe found direct loops faster through 400k nonzeros
+    // and Accelerate faster at 1.3M, so keep the smaller path inexpensive.
+#ifdef MLXPDLP_HAS_ACCELERATE_SPARSE
+    std::unique_ptr<detail::CpuSparseMatrix> accelerated_matrix;
+    if (nnz >= 1000000) {
+        accelerated_matrix = std::make_unique<detail::CpuSparseMatrix>(m, n);
+        accelerated_matrix->assign_csr(m, row_ptr.data(), col_ind.data(), a.data());
+    }
+#endif
+
+    // Accelerate owns its transpose representation. Allocate a second CSR
+    // only for the portable/smaller-model fallback.
+    std::vector<int> transpose_row_ptr;
+    std::vector<int> transpose_col_ind;
+    std::vector<double> transpose_values;
+#ifdef MLXPDLP_HAS_ACCELERATE_SPARSE
+    if (!accelerated_matrix)
+#endif
+    {
+        transpose_row_ptr.assign(static_cast<size_t>(n) + 1, 0);
+        for (int column : col_ind)
+            ++transpose_row_ptr[static_cast<size_t>(column) + 1];
+        for (int column = 0; column < n; ++column)
+            transpose_row_ptr[static_cast<size_t>(column) + 1] +=
+                transpose_row_ptr[static_cast<size_t>(column)];
+        transpose_col_ind.resize(static_cast<size_t>(nnz));
+        transpose_values.resize(static_cast<size_t>(nnz));
+        auto transpose_next = transpose_row_ptr;
+        for (int row = 0; row < m; ++row) {
+            for (int entry = row_ptr[static_cast<size_t>(row)];
+                 entry < row_ptr[static_cast<size_t>(row + 1)]; ++entry) {
+                const int column = col_ind[static_cast<size_t>(entry)];
+                const int target = transpose_next[static_cast<size_t>(column)]++;
+                transpose_col_ind[static_cast<size_t>(target)] = row;
+                transpose_values[static_cast<size_t>(target)] = a[static_cast<size_t>(entry)];
+            }
         }
     }
 
     auto multiply_a = [&](const std::vector<double> &input, std::vector<double> &output) {
+#ifdef MLXPDLP_HAS_ACCELERATE_SPARSE
+        if (accelerated_matrix) {
+            accelerated_matrix->multiply(false, input.data(), output.data(), m);
+            return;
+        }
+#endif
         for (int row = 0; row < m; ++row) {
             long double sum = 0.0L;
             for (int entry = row_ptr[static_cast<size_t>(row)];
@@ -361,6 +388,12 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
         }
     };
     auto multiply_at = [&](const std::vector<double> &input, std::vector<double> &output) {
+#ifdef MLXPDLP_HAS_ACCELERATE_SPARSE
+        if (accelerated_matrix) {
+            accelerated_matrix->multiply(true, input.data(), output.data(), n);
+            return;
+        }
+#endif
         for (int column = 0; column < n; ++column) {
             long double sum = 0.0L;
             for (int entry = transpose_row_ptr[static_cast<size_t>(column)];
@@ -1385,16 +1418,11 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
             const double error = std::log(dual_distance) -
                                  std::log(primal_distance) -
                                  std::log(primal_weight);
-            error_sum = error_sum * restart.i_smooth + error;
-            const double derivative = error - last_error;
-            primal_weight *=
-                std::exp(restart.k_p * error + restart.k_i * error_sum +
-                         restart.k_d * derivative);
-            last_error = error;
-            if (!std::isfinite(primal_weight) || primal_weight <= 0.0)
-                primal_weight = best_primal_weight;
+            primal_weight =
+                detail::pid_weight(primal_weight, error, restart.k_p, restart.k_i, restart.k_d,
+                                   restart.i_smooth, error_sum, last_error, best_primal_weight);
         } else {
-            primal_weight = best_primal_weight;
+            primal_weight = detail::bounded_weight(best_primal_weight);
             error_sum = 0.0;
             last_error = 0.0;
         }

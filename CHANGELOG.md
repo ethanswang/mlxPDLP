@@ -10,6 +10,15 @@ and the project intends to follow
 
 ### Added
 
+- Optional `conservative_step_size` and bounded numerical recovery from complete
+  finite checkpoints when a power estimate permits an invalid fixed-point
+  metric. Exhausted recovery reports `NUMERICAL_ERROR` (enum 9).
+- Opt-in Metal `host_double_residual_evaluation` (disabled by default): periodic FP64
+  working-model audits, denser checks near convergence, and retention of the
+  best audited primal/dual/reduced-cost certificate.
+- Benchmark schema 9 records build revision, dirty state, source digest, MLX
+  revision, requested/selected restart policies, and numerical recovery/audit
+  counts. `--no-restart-policy-retry` supports isolated PID/HPR comparisons.
 - Independent `eps_infeasible_relative` in the C++ and Python termination
   criteria, defaulting to cuPDLPx's `1e-14` on CPU and Metal. The requested
   ray residual ratio is honored without Metal relaxation; the separate
@@ -45,6 +54,15 @@ and the project intends to follow
 
 ### Changed
 
+- Correct HPR's inverse conversion from primal step to primal weight and restore
+  its necessary-reduction restart condition. Guard PID updates in log space,
+  clamp finite positive weights, and validate controller/reflection parameters.
+- Unscale exported certificates in host FP64. Larger host continuation matrices
+  reuse Accelerate sparse products through the same backend as CPU PDHG;
+  correction budgets and independent certificate validation are preserved.
+- Serialize benchmark Metal warmup and prime all sparse kernel strategies in
+  both orientations to avoid the MLX first-use custom-kernel cache race observed
+  with parallel Netlib workers. Timed instance scheduling remains parallel.
 - Upgrade PSLP from 0.0.8 to 0.0.11 for parallel-row bound preservation,
   nonvertex reduced-cost reconstruction, objective-cancellation fixes, and
   early release of the presolve transpose. Build, bootstrap, installed-package

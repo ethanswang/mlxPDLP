@@ -130,25 +130,20 @@ static void bind_parameters(nb::module_ &m) {
     nb::class_<pdhg_parameters_t>(m, "Parameters",
                                   "PDHG solver parameters (defaults filled by "
                                   "mlxpdlp_set_default_parameters).")
-        .def("__init__", [](pdhg_parameters_t *self) {
-            new (self) pdhg_parameters_t();
-            mlxpdlp_set_default_parameters(self);
-        })
-        .def_rw("geometric_mean_iterations",
-                &pdhg_parameters_t::geometric_mean_iterations,
+        .def("__init__",
+             [](pdhg_parameters_t *self) {
+                 new (self) pdhg_parameters_t();
+                 mlxpdlp_set_default_parameters(self);
+             })
+        .def_rw("geometric_mean_iterations", &pdhg_parameters_t::geometric_mean_iterations,
                 "Geometric-mean scaling passes (0 disables; default 12).")
-        .def_rw("curtis_reid_iterations",
-                &pdhg_parameters_t::curtis_reid_iterations,
+        .def_rw("curtis_reid_iterations", &pdhg_parameters_t::curtis_reid_iterations,
                 "Curtis-Reid scaling passes (0 disables).")
-        .def_rw("l_inf_ruiz_iterations",
-                &pdhg_parameters_t::l_inf_ruiz_iterations,
+        .def_rw("l_inf_ruiz_iterations", &pdhg_parameters_t::l_inf_ruiz_iterations,
                 "L-infinity Ruiz scaling iterations.")
-        .def_rw("has_pock_chambolle_alpha",
-                &pdhg_parameters_t::has_pock_chambolle_alpha)
-        .def_rw("pock_chambolle_alpha",
-                &pdhg_parameters_t::pock_chambolle_alpha)
-        .def_rw("bound_objective_rescaling",
-                &pdhg_parameters_t::bound_objective_rescaling)
+        .def_rw("has_pock_chambolle_alpha", &pdhg_parameters_t::has_pock_chambolle_alpha)
+        .def_rw("pock_chambolle_alpha", &pdhg_parameters_t::pock_chambolle_alpha)
+        .def_rw("bound_objective_rescaling", &pdhg_parameters_t::bound_objective_rescaling)
         .def_rw("verbose", &pdhg_parameters_t::verbose)
         .def_rw("termination_evaluation_frequency",
                 &pdhg_parameters_t::termination_evaluation_frequency)
@@ -158,36 +153,33 @@ static void bind_parameters(nb::module_ &m) {
                 "Relative sigma-squared change tolerance over ten iterations.")
         .def_prop_rw(
             "termination_criteria",
-            [](pdhg_parameters_t &p) -> termination_criteria_t & {
-                return p.termination_criteria;
-            },
+            [](pdhg_parameters_t &p) -> termination_criteria_t & { return p.termination_criteria; },
             [](pdhg_parameters_t &p, const termination_criteria_t &value) {
                 p.termination_criteria = value;
             })
         .def_prop_rw(
             "restart_params",
-            [](pdhg_parameters_t &p) -> restart_parameters_t & {
-                return p.restart_params;
-            },
+            [](pdhg_parameters_t &p) -> restart_parameters_t & { return p.restart_params; },
             [](pdhg_parameters_t &p, const restart_parameters_t &value) {
                 p.restart_params = value;
             })
         .def_rw("restart_policy", &pdhg_parameters_t::restart_policy,
                 "Primal-weight restart policy: 0 = cuPDLPx PID (default), "
-                "1 = HPR-LP-style sigma update, 2 = frozen-weight diagnostic.")
+                "1 = HPR-LP-style sigma update.")
+        .def_rw("conservative_step_size", &pdhg_parameters_t::conservative_step_size,
+                "Start from a stored-matrix norm upper bound instead of power iteration.")
+        .def_rw("host_double_residual_evaluation",
+                &pdhg_parameters_t::host_double_residual_evaluation,
+                "Audit Metal certificates in FP64 periodically and near convergence (default off).")
         .def_rw("conditional_termination_evaluation",
                 &pdhg_parameters_t::conditional_termination_evaluation,
                 "Use Metal-adapted cuOpt Stable3-style early termination "
                 "checkpoints near convergence for working models up to 262,144 "
                 "nonzeros, without changing the configured restart cadence.")
-        .def_rw("reflection_coefficient",
-                &pdhg_parameters_t::reflection_coefficient)
-        .def_rw("feasibility_polishing",
-                &pdhg_parameters_t::feasibility_polishing)
-        .def_rw("host_double_polishing",
-                &pdhg_parameters_t::host_double_polishing)
-        .def_rw("host_double_early_handoff",
-                &pdhg_parameters_t::host_double_early_handoff)
+        .def_rw("reflection_coefficient", &pdhg_parameters_t::reflection_coefficient)
+        .def_rw("feasibility_polishing", &pdhg_parameters_t::feasibility_polishing)
+        .def_rw("host_double_polishing", &pdhg_parameters_t::host_double_polishing)
+        .def_rw("host_double_early_handoff", &pdhg_parameters_t::host_double_early_handoff)
         .def_rw("host_double_polishing_iteration_limit",
                 &pdhg_parameters_t::host_double_polishing_iteration_limit)
         .def_rw("host_double_polishing_time_sec_limit",
@@ -195,26 +187,19 @@ static void bind_parameters(nb::module_ &m) {
         .def_rw("optimality_norm", &pdhg_parameters_t::optimality_norm)
         .def_rw("presolve", &pdhg_parameters_t::presolve,
                 "Enable PSLP presolve (incompatible with warm starts).")
-        .def_rw("presolve_singleton_columns",
-                &pdhg_parameters_t::presolve_singleton_columns)
-        .def_rw("presolve_doubleton_equations",
-                &pdhg_parameters_t::presolve_doubleton_equations)
-        .def_rw("presolve_parallel_rows",
-                &pdhg_parameters_t::presolve_parallel_rows)
-        .def_rw("presolve_parallel_columns",
-                &pdhg_parameters_t::presolve_parallel_columns)
+        .def_rw("presolve_singleton_columns", &pdhg_parameters_t::presolve_singleton_columns)
+        .def_rw("presolve_doubleton_equations", &pdhg_parameters_t::presolve_doubleton_equations)
+        .def_rw("presolve_parallel_rows", &pdhg_parameters_t::presolve_parallel_rows)
+        .def_rw("presolve_parallel_columns", &pdhg_parameters_t::presolve_parallel_columns)
         .def_rw("presolve_dual_fix", &pdhg_parameters_t::presolve_dual_fix)
         .def_rw("presolve_finite_bound_tightening",
                 &pdhg_parameters_t::presolve_finite_bound_tightening)
-        .def_rw("presolve_primal_propagation",
-                &pdhg_parameters_t::presolve_primal_propagation)
+        .def_rw("presolve_primal_propagation", &pdhg_parameters_t::presolve_primal_propagation)
         .def_rw("matrix_zero_tol", &pdhg_parameters_t::matrix_zero_tol)
         .def_rw("metal_fused_kernels", &pdhg_parameters_t::metal_fused_kernels)
         .def_prop_rw(
             "tolerance",
-            [](pdhg_parameters_t &p) {
-                return p.termination_criteria.eps_optimal_relative;
-            },
+            [](pdhg_parameters_t &p) { return p.termination_criteria.eps_optimal_relative; },
             [](pdhg_parameters_t &p, double value) {
                 p.termination_criteria.eps_optimal_relative = value;
                 p.termination_criteria.eps_feasible_relative = value;
@@ -224,17 +209,13 @@ static void bind_parameters(nb::module_ &m) {
             "Set the optimality and feasibility tolerances together.")
         .def_prop_rw(
             "time_limit_seconds",
-            [](pdhg_parameters_t &p) {
-                return p.termination_criteria.time_sec_limit;
-            },
+            [](pdhg_parameters_t &p) { return p.termination_criteria.time_sec_limit; },
             [](pdhg_parameters_t &p, double value) {
                 p.termination_criteria.time_sec_limit = value;
             })
         .def_prop_rw(
             "iteration_limit",
-            [](pdhg_parameters_t &p) {
-                return p.termination_criteria.iteration_limit;
-            },
+            [](pdhg_parameters_t &p) { return p.termination_criteria.iteration_limit; },
             [](pdhg_parameters_t &p, int value) {
                 p.termination_criteria.iteration_limit = value;
             });
@@ -334,6 +315,8 @@ static const char *termination_reason_name(int reason) {
         return "FEAS_POLISH_SUCCESS";
     case TERMINATION_REASON_HOST_DOUBLE_HANDOFF:
         return "HOST_DOUBLE_HANDOFF";
+    case TERMINATION_REASON_NUMERICAL_ERROR:
+        return "NUMERICAL_ERROR";
     default:
         return "UNSPECIFIED";
     }
@@ -427,12 +410,12 @@ static void bind_solver(nb::module_ &m) {
         .value("OPTIMAL", TERMINATION_REASON_OPTIMAL)
         .value("PRIMAL_INFEASIBLE", TERMINATION_REASON_PRIMAL_INFEASIBLE)
         .value("DUAL_INFEASIBLE", TERMINATION_REASON_DUAL_INFEASIBLE)
-        .value("INFEASIBLE_OR_UNBOUNDED",
-               TERMINATION_REASON_INFEASIBLE_OR_UNBOUNDED)
+        .value("INFEASIBLE_OR_UNBOUNDED", TERMINATION_REASON_INFEASIBLE_OR_UNBOUNDED)
         .value("TIME_LIMIT", TERMINATION_REASON_TIME_LIMIT)
         .value("ITERATION_LIMIT", TERMINATION_REASON_ITERATION_LIMIT)
         .value("FEAS_POLISH_SUCCESS", TERMINATION_REASON_FEAS_POLISH_SUCCESS)
-        .value("HOST_DOUBLE_HANDOFF", TERMINATION_REASON_HOST_DOUBLE_HANDOFF);
+        .value("HOST_DOUBLE_HANDOFF", TERMINATION_REASON_HOST_DOUBLE_HANDOFF)
+        .value("NUMERICAL_ERROR", TERMINATION_REASON_NUMERICAL_ERROR);
 
     nb::class_<MlxPdlpSolver>(m, "Solver",
                               "PDHG solver for minimization problems\n\n"

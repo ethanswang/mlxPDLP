@@ -51,6 +51,8 @@ line number so it remains useful as the source evolves.
 | Batched lazy evaluation of fused iterations | Implemented with a memory-bounded batch |
 | Batched block-level scalar reductions | Implemented with one host synchronization per metric group |
 | Sparse Metal infeasibility-check cadence | First block, about every 1,000 iterations, and limit blocks |
+| Step-size safeguards | Optional norm-bound initialization and bounded recovery from finite checkpoints |
+| Metal FP64 certificate feedback | Opt-in working-model checks and best audited certificate retention |
 
 The C++ solver API lives in the `mlxpdlp` namespace. The C-compatible MPS
 loader uses globally visible `mlxpdlp_`-prefixed names.
@@ -61,6 +63,9 @@ loader uses globally visible `mlxpdlp_`-prefixed names.
 |---|---|
 | `include/mlxPDLP/solver.h` | Public solver types, state, and `MlxPdlpSolver` API |
 | `src/solver.cpp` | MLX-backed PDHG implementation |
+| `src/pdhg_control.h` | Shared guarded PID/HPR updates and numerical-metric checks |
+| `src/cpu_sparse_matrix.h` | Accelerate sparse matrix ownership shared by CPU PDHG and FP64 continuation |
+| `src/host_double_polish.cpp` | Bounded host FP64 certificate correction and continuation |
 | `src/presolve_adapter.*` | Private PSLP ownership, CSR normalization, and postsolve adapter |
 | `include/mlxPDLP/mps_loader.h` | Public standalone MPS loader API |
 | `src/mps_loader.c` | Ownership adapter from the parser to `mlxpdlp_mps_problem_t` |
@@ -73,6 +78,7 @@ loader uses globally visible `mlxpdlp_`-prefixed names.
 | `examples/installed_consumer` | Downstream `find_package` link-and-solve check |
 | `tests/test_mlx_basic.cpp` | Basic MLX CPU diagnostic |
 | `tests/test_solver.cpp` | Solver regression tests |
+| `tests/test_pdhg_safeguards.cpp` | Adversarial spectral, controller, precision-feedback, and native-continuation regressions |
 | `tests/test_device_comparison.cpp` | Analytic and sparse duplicate-coordinate CPU/GPU comparison |
 | `tests/test_mps_device_comparison.cpp` | Netlib ADLITTLE CPU/GPU comparison |
 | `tests/data/netlib` | Vendored ADLITTLE MPS benchmark and provenance |
@@ -82,6 +88,7 @@ loader uses globally visible `mlxpdlp_`-prefixed names.
 | `benchmarks/compare_lpfeas.py` | Cross-system comparison with published B200 GPU times |
 | `benchmarks/data/netlib` | Larger PILOT87 benchmark and provenance |
 | `cmake/FindMLX.cmake` | MLX source/build/install discovery |
+| `cmake/BenchmarkProvenance.cmake` | Build-time benchmark revision, dirty-state, and source-digest metadata |
 | `cmake/mlxPDLPConfig.cmake.in` | Installed CMake package configuration |
 
 ## Standalone build and installation
@@ -295,11 +302,23 @@ double and is rounded once when the final Metal buffers are materialized.
 The algorithm and stopping logic are shared, but the arithmetic contract is
 intentionally different. CPU is the reliable higher-accuracy fallback and
 reference path; Metal is the high-throughput path with a practical `1e-4`
-target. Because Apple Silicon GPUs do not expose FP64 arithmetic, that
-`1e-4` tolerance (with a `5e-5` internal stopping target) is the portable
-Metal accuracy ceiling — tighter targets are supported on the FP64 CPU
-backend. Result extraction handles either dtype and returns public `double`
-buffers.
+target. The benchmark uses a `5e-5` internal stopping target to leave margin
+for the `1e-4` original-model audit. Attainable accuracy depends on the model;
+tighter targets can require CPU FP64 execution or the optional bounded host
+continuation. Result extraction handles either dtype and returns public
+`double` buffers.
+
+Result extraction transfers scaled iterates first and unscales them in host
+FP64, using the host scaling factors on sparse backends and the stored factors
+on dense backends. Enabling Metal's `host_double_residual_evaluation` checks
+the unscaled working-model certificate at initialization, every 2,000
+iterations at the next evaluation checkpoint, and every checkpoint after
+entering the convergence or host-handoff region. These checks guide stopping,
+handoff, and retention of a complete best audited `x/y/z` certificate. Its
+merit divides each error by its requested tolerance, so a tighter gap target
+cannot be lost when comparing two checkpoints. PID keeps its device
+projection-residual definition. Presolved runs still receive
+the mandatory original-model audit after postsolve.
 
 ### Lazy evaluation and synchronization
 
@@ -477,6 +496,9 @@ post-Ruiz refresh is required).
 | `metal_fused_kernels` | `true` |
 | `sv_max_iter` | `200` |
 | `sv_tol` | `1e-4` |
+| `conservative_step_size` | `false` |
+| `host_double_residual_evaluation` | `false` (opt-in, Metal only) |
+| `restart_policy` | `0` (PID) |
 | `eps_optimal_relative` | `1e-4` |
 | `eps_feasible_relative` | `1e-4` |
 | `eps_infeasible_relative` | `1e-14` |
@@ -513,6 +535,13 @@ feasible but suboptimal primal point while its complementarity/objective gap
 cannot improve without moving `x`. This split remains inside the single
 configured host-correction cap, and best-certificate retention protects an
 already-good primal point from regression.
+
+For at least 1,000,000 nonzeros, host continuation reuses the Accelerate FP64 sparse
+matrix wrapper used by CPU PDHG. Smaller models and non-Accelerate builds retain
+direct CSR products. A fallback transpose is allocated only when needed;
+independent final certificate accumulation remains separate from these products.
+The cutoff follows LPfeas product measurements: direct loops win
+through 400,000 nonzeros, while Accelerate wins on the 1.3-million-entry case.
 
 ## Presolve, postsolve, and warm starts
 
@@ -659,6 +688,22 @@ finite estimate, the solver uses the Frobenius norm of `A` as a conservative
 spectral-norm bound. An empty or numerically zero matrix falls back to a step
 size of one.
 
+A power estimate is a lower estimate, not a certificate of step stability.
+`conservative_step_size=true` skips power iteration and bounds the actual
+stored matrix by `min(||A||F, sqrt(||A||1 ||A||inf))`, with outward rounding and
+an accumulation-error allowance. Sparse inputs with possible duplicate
+coordinates use the row/column bound. Metal coefficient rounding is included.
+
+By default the faster power-based initialization remains enabled. Every
+evaluation checkpoint tests the fixed-point quadratic form for significant
+negativity or non-finite arithmetic. A failed metric or non-finite KKT point
+restores a complete finite checkpoint, reduces the step below the stored-matrix
+bound, and resets the Halpern anchors, candidate/reflection arrays, PID history,
+and HPR baselines together. Only rounding-scale negative values may be clamped
+to zero. Cold starts retain an initial checkpoint too. Recovery consumes the
+existing iteration/time budget; after eight recoveries or an unavailable
+checkpoint, the solver reports `NUMERICAL_ERROR` (9).
+
 When bound/objective scaling is enabled, the initial primal weight is one.
 Otherwise it is initialized from the original objective and constraint-bound
 norms. The directional steps are:
@@ -689,8 +734,9 @@ After a regular checkpoint is within 10x of each requested tolerance, working
 models with at most 262,144 nonzeros receive a termination-only midpoint check
 every 100 iterations below 10,000. The interval grows by a decade at each
 subsequent threshold. These checks can stop sooner or preserve a better
-time-limited iterate, but do not compute fixed-point error or trigger a restart,
-so enabling them does not change the iterate trajectory at regular checkpoints.
+time-limited iterate and check the fixed-point metric for numerical safety.
+They do not trigger ordinary adaptive restarts, so they preserve the regular
+checkpoint trajectory unless a numerical recovery is needed.
 Larger sparse models retain the fixed cadence because another residual pass and
 Metal synchronization cost more than the expected saved iterations.
 
@@ -753,8 +799,10 @@ interaction = 2 * step_size * dot(Aᵀ delta_y, delta_x)
 fixed_point_error = sqrt(max(movement + interaction, 0))
 ```
 
-The nonnegative guard prevents roundoff or a negative interaction term from
-producing an invalid square root.
+Before the square root, the solver rejects non-finite terms or sums, and sums
+below `-64 * epsilon * max(movement, abs(interaction))`, using the execution
+dtype's epsilon. Only negative sums within this rounding allowance are clipped
+to zero. Rejected metrics enter numerical recovery before termination checks.
 
 ## Residuals and objectives
 
@@ -768,11 +816,11 @@ ATy         = Aᵀ y_pdhg
 dual_res    = objective - ATy - dual_slack
 ```
 
-Absolute residuals undo the corresponding global scaling:
+Absolute residuals undo diagonal and global scaling:
 
 ```text
-absolute_primal_residual = ||primal_res||₂ / con_bound_rescale
-absolute_dual_residual   = ||dual_res||₂ / obj_vec_rescale
+absolute_primal_residual = ||primal_res * con_rescale||₂ / con_bound_rescale
+absolute_dual_residual   = ||dual_res * var_rescale||₂ / obj_vec_rescale
 ```
 
 Relative residuals use the original problem norms computed before
@@ -799,13 +847,13 @@ components and the upper bound otherwise, replacing infinite bounds with
 zero before multiplication. It also includes the dual-slack contribution.
 
 ```text
-objective_gap          = primal_objective - dual_objective
+objective_gap          = abs(primal_objective - dual_objective)
 relative_objective_gap =
-    objective_gap / max(abs(primal_objective), abs(dual_objective), 1)
+    objective_gap / (1 + abs(primal_objective) + abs(dual_objective))
 ```
 
-The relative gap is currently signed, and the termination check compares it
-directly with `eps_optimal_relative`.
+The termination check compares this absolute relative gap with
+`eps_optimal_relative`.
 
 ## Adaptive restart and primal-weight update
 
@@ -818,9 +866,6 @@ directly with `eps_optimal_relative`.
    increased since the previous trial;
 4. restart when `inner_count` reaches
    `artificial_restart_threshold × total_count`.
-
-The legacy `interaction` and `movement` output parameters remain in the
-method signature but are not used by these current restart decisions.
 
 `mlx_perform_restart()` first measures:
 
@@ -849,7 +894,18 @@ primal_weight *= exp(k_p * error
 ```
 
 Invalid distance or residual conditions restore the best previously observed
-primal weight. The final weight is clamped to `[1e-12, 1e12]`.
+primal weight. The implementation adds the update to `log(primal_weight)` and
+clamps before exponentiation to keep weights in `[1e-12, 1e12]`. A non-finite
+update restores the best valid weight and clears integral/derivative memory.
+Controller gains must be finite; `i_smooth` must lie in `[0,1]`.
+
+With `restart_policy=1`, HPR uses sufficient reduction at `0.2` of the previous
+restart's movement, necessary reduction at `0.6` followed by growth since the
+previous fresh checkpoint, or an epoch length of `0.2 * total_count`. Its
+movement-ratio weight blends with the best-gap weight. Because HPR's primal
+step is `sigma = eta / w`, the near-convergence adjustment `sigma *= kappa`
+maps to `w /= kappa`. The full-reflection default remains
+`reflection_coefficient=1`; `0.5` means ordinary Halpern iteration.
 
 Restart then:
 
@@ -923,14 +979,18 @@ Timing uses `std::chrono::steady_clock` and is stored in
 x_final = x_pdhg / var_rescale / con_bound_rescale
 y_final = y_pdhg / con_rescale / obj_vec_rescale
 
-reduced_cost =
-    (scaled_objective - Aᵀ y_pdhg) * var_rescale / obj_vec_rescale
+reduced_cost = dual_slack * var_rescale / obj_vec_rescale
 ```
 
-The three MLX arrays are evaluated, read as `float`, widened to `double`, and
-stored in new host arrays. For a reduced PSLP problem, postsolve replaces
-those buffers with reconstructed original-dimension primal, dual, and
-reduced-cost arrays. The result retains reduced dimensions in its
+The three scaled MLX arrays are materialized contiguously, copied to host
+double arrays, and then unscaled in FP64. Reduced costs are projected onto
+the signs allowed by finite variable bounds. For a reduced PSLP problem,
+postsolve replaces those buffers with reconstructed original-dimension
+primal, dual, and reduced-cost arrays. The final original-model audit compares
+the projection certificate with an exact-stationarity reduced-cost candidate
+and retains a replacement when the maximum of the relative dual residual and
+relative objective gap improves. It then checks every certificate component
+against its requested tolerance. The result retains reduced dimensions in its
 `num_reduced_*` fields and exposes PSLP status and elapsed time.
 
 `solve()` returns a heap-allocated `mlxpdlp_result_t`, including its three
@@ -988,6 +1048,7 @@ CTest registers:
 | `netlib_convergence_example` | Netlib ADLITTLE convergence sweep and published-objective check |
 | `mlx_basic` | Basic MLX CPU array operations |
 | `solver` | Solver, warm-start, presolve, postsolve, termination, and FP64 Farkas infeasibility-certificate regressions |
+| `pdhg_safeguards_cpu`, `pdhg_safeguards_metal` | Underestimated spectral norm, bounded recovery, conservative steps, PID/HPR guards, FP64 feedback, and native continuation |
 | `device_comparison` | Analytic and sparse LPs on CPU and GPU, fused/unfused iteration agreement across all three SpMV strategies, SIMD-group threshold override, infeasibility tolerance independence and false-status regressions on CPU/Metal, FP32 Metal infeasibility certificates, and sparse-Metal certificate cadence |
 | `mps_device_comparison` | Bundled Netlib ADLITTLE MPS on CPU and GPU |
 | `netlib_regression_cpu` | Opt-in downloaded 40-case Netlib audit on CPU FP64 |

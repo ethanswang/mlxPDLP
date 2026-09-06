@@ -275,6 +275,16 @@ if(MLXPDLP_BUILD_BENCHMARKS)
     mlxpdlp_enable_warnings(mlxpdlp_mps_benchmark)
 
     add_executable(mlxpdlp_lpfeas_benchmark benchmarks/lpfeas_benchmark.cpp)
+    add_custom_target(mlxpdlp_benchmark_provenance
+        COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DMLX_SOURCE_DIR=${MLX_SOURCE_DIR}"
+            "-DMLX_INCLUDE_DIR=${MLX_INCLUDE_DIR}"
+            "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/benchmark_provenance.h"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BenchmarkProvenance.cmake"
+        BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/benchmark_provenance.h"
+        VERBATIM)
+    add_dependencies(mlxpdlp_lpfeas_benchmark mlxpdlp_benchmark_provenance)
+    target_include_directories(mlxpdlp_lpfeas_benchmark PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(mlxpdlp_lpfeas_benchmark PRIVATE mlxpdlp_lpfeas_support)
     if(MLXPDLP_BUILD_PRESOLVE)
         target_compile_definitions(mlxpdlp_lpfeas_benchmark PRIVATE
@@ -313,6 +323,13 @@ if(BUILD_TESTING)
 
     add_test(NAME mlx_basic COMMAND mlxpdlp_mlx_basic_test)
     add_test(NAME solver COMMAND mlxpdlp_solver_test)
+    add_executable(mlxpdlp_pdhg_safeguards tests/test_pdhg_safeguards.cpp)
+    target_include_directories(mlxpdlp_pdhg_safeguards PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(mlxpdlp_pdhg_safeguards PRIVATE mlxPDLP::solver)
+    mlxpdlp_enable_warnings(mlxpdlp_pdhg_safeguards)
+    add_test(NAME pdhg_safeguards_cpu COMMAND mlxpdlp_pdhg_safeguards cpu)
+    add_test(NAME pdhg_safeguards_metal COMMAND mlxpdlp_pdhg_safeguards metal)
+    set_tests_properties(pdhg_safeguards_metal PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME device_comparison COMMAND mlxpdlp_device_comparison)
     set_tests_properties(device_comparison PROPERTIES SKIP_RETURN_CODE 77)
 

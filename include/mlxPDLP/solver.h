@@ -58,7 +58,8 @@ typedef enum {
     // The fp32 iterate entered the bounded admission region for the optional
     // fp64 continuation. A successful continuation rewrites this to OPTIMAL;
     // otherwise callers can distinguish an intentional handoff from a limit.
-    TERMINATION_REASON_HOST_DOUBLE_HANDOFF = 8
+    TERMINATION_REASON_HOST_DOUBLE_HANDOFF = 8,
+    TERMINATION_REASON_NUMERICAL_ERROR = 9
 } termination_reason_t;
 
 typedef enum { NORM_TYPE_L2 = 0, NORM_TYPE_L_INF = 1 } norm_type_t;
@@ -100,8 +101,9 @@ typedef struct {
     restart_parameters_t restart_params;
     // 0 = cuPDLPx PID primal-weight restart (default); 1 = HPR-LP-style
     // movement-ratio sigma update with best-gap anchoring (HPR-LP-C
-    // src/HPRLP.cu update_sigma/check_restart).
+    // src/main_iterate.cu update_sigma/check_restart).
     int restart_policy;
+    // In (0, 1]: 1 is full reflection 2T-I; 0.5 is ordinary Halpern on T.
     double reflection_coefficient;
     bool feasibility_polishing;
     bool host_double_polishing;
@@ -131,6 +133,13 @@ typedef struct {
     // termination and retain the best iterate, while primal-weight restarts
     // stay on the normal cadence so the PDHG trajectory is unchanged.
     bool conditional_termination_evaluation;
+    // Use an upper bound on the stored, scaled matrix norm from the outset.
+    // Otherwise use power iteration with bounded recovery on an invalid
+    // fixed-point metric or non-finite iterate (the default).
+    bool conservative_step_size;
+    // Off by default. Metal: periodically audit the working-model certificate
+    // in host FP64, and at every checkpoint near convergence. CPU already uses FP64.
+    bool host_double_residual_evaluation;
 } pdhg_parameters_t;
 
 typedef struct {
@@ -270,7 +279,7 @@ struct MlxPdlpState {
 
     // Solution state — primal (n-vectors)
     mx::array x_cur;  // current_primal
-    mx::array x_pdhg; // pdhg_primal (ergodic avg, stored at major iterations)
+    mx::array x_pdhg; // projected PDHG candidate, stored at major iterations
     mx::array x_ref;  // reflected_primal
     mx::array x_init; // initial_primal (restart anchor)
     mx::array x_best; // best evaluated primal iterate
@@ -303,6 +312,9 @@ struct MlxPdlpState {
     int total_count;
     int singular_value_iterations;
     int infeasibility_check_count;
+    int step_size_reductions = 0;
+    int host_double_audit_count = 0;
+    double operator_norm_upper_bound = 0.0;
 
     // Residual / fixed-point scalars
     double absolute_primal_residual;
@@ -476,6 +488,8 @@ class MlxPdlpSolver {
     bool sparse_metal_candidate_ = false;
     bool sparse_cpu_candidate_ = false;
     std::shared_ptr<detail::CpuSparseMatrix> sparse_cpu_matrix_;
+    bool invalid_fixed_point_metric_ = false;
+    double restart_relative_primal_residual_ = 0.0;
 
     // Early fp64 continuation is triggered only after fp32 first reaches its
     // stricter admission region and then fails to make a substantial KKT
@@ -542,8 +556,9 @@ class MlxPdlpSolver {
     void mlx_pock_chambolle_scaling(double alpha);
     void mlx_bound_objective_scaling();
 
-    // ---- Singular value estimation (power method) ----
+    // ---- Singular value estimation and step safety ----
     double mlx_estimate_max_singular_value();
+    double mlx_operator_norm_upper_bound();
 
     // ---- PDHG iteration sub-steps ----
     void mlx_compute_next_primal(int k_offset, bool is_major);
@@ -558,6 +573,7 @@ class MlxPdlpSolver {
     void mlx_compute_residual();
     void mlx_save_best_iterate();
     void mlx_restore_best_iterate();
+    bool mlx_recover_numerical_failure();
     void mlx_primal_feasibility_polish();
     void mlx_dual_feasibility_polish();
     void mlx_compute_infeasibility_information();
@@ -583,8 +599,23 @@ class MlxPdlpSolver {
     mlxpdlp_result_t *extract_presolve_result();
     void apply_postsolve(mlxpdlp_result_t *result);
     void polish_original_dual_certificate(mlxpdlp_result_t *result);
-    double recompute_original_certificate(mlxpdlp_result_t *result);
+    double recompute_original_certificate(mlxpdlp_result_t *result, bool working_model = false,
+                                          bool refine_reduced_cost = true);
+    void copy_unscaled_certificate(double *x, double *y, double *z);
+    void mlx_host_double_feedback(bool force = false, bool prefer_best = false);
     void host_double_polish(mlxpdlp_result_t *result, bool working_model = false);
+
+    std::vector<double> solution_variable_scale_;
+    std::vector<double> solution_constraint_scale_;
+    bool host_double_feedback_active_ = false;
+    int last_host_double_audit_iteration_ = 0;
+    double host_double_best_kkt_ = std::numeric_limits<double>::infinity();
+    // Absolute/relative primal and dual residuals, primal/dual objectives,
+    // absolute/relative gap. No borrowed certificate pointers are retained.
+    std::vector<double> host_double_best_metrics_;
+    mx::array host_double_best_x_ = _mlx_empty_array();
+    mx::array host_double_best_y_ = _mlx_empty_array();
+    mx::array host_double_best_slack_ = _mlx_empty_array();
 };
 
 // Initialize a parameter struct with mlxPDLP defaults.

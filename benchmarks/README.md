@@ -35,14 +35,36 @@ benchmarks/data/lpfeas/download.sh
 
 The default protocol uses Metal CSR in FP32, PSLP 0.0.11, L2 residuals,
 12 geometric-mean iterations, 10 Ruiz iterations, Pock-Chambolle alpha 1,
-bound/objective scaling, evaluation frequency 200, up to 5,000 power-method
+bound/objective scaling, evaluation frequency 200, up to 200 power-method
 iterations, a 1,000-second per-attempt limit, and a practical `1e-4`
 convergence tolerance. The iteration limit is otherwise unlimited. Each worker
-warms the sparse Metal path and both adaptive row-kernel branches before the
-sweep clock starts; pass `--cold-start` to include first-use compilation.
+warms all three sparse Metal strategies in both orientations before the sweep
+clock starts. Warmup is serialized because the linked MLX custom-kernel cache
+can race during concurrent first-use compilation; timed solves use parallel
+worker streams. Pass `--cold-start` with `--jobs 1` to include first-use compilation.
 The internal stopping target defaults to `0.5 * tolerance` (`5e-5`) to leave
 rounding margin for the original-model audit; override it with
 `--solver-tolerance` when reproducing an exact trajectory.
+
+Schema 9 includes build-time Git revision/dirty state, a digest of solver and
+benchmark sources, and the MLX checkout revision (`unknown` when only an
+installation without a source checkout is available). The protocol records the
+requested restart policy and each result records the selected policy plus
+numerical-recovery and FP64-audit counts. For isolated PID/HPR comparisons,
+use `--restart-policy 0` or `1` with `--no-restart-policy-retry` and disable
+the other portfolio retries as needed. `--conservative-step-size` starts from
+a stored-matrix norm upper bound. Periodic Metal FP64 feedback is disabled by
+default; `--host-double-residual-evaluation` enables it, and
+`--no-host-double-residual-evaluation` explicitly disables it.
+
+A matched five-trial comparison
+on CONT1, NUG08-3RD, QAP15, and S250R10 measured an 11.9% increase in aggregate
+Metal solve time with the new FP64 feedback (9.50 to 10.63 seconds), with
+unchanged iteration counts. Disabling periodic feedback restored 9.49 seconds,
+which is the configuration now used by default.
+The checks improve certificate feedback at a measurable cost; the separate
+Accelerate improvement concerns large host continuation products.
+
 On macOS, CPU problems whose dense matrix would contain at least 16,777,216
 elements and whose density is at most 25% use Accelerate FP64 sparse SpMV.
 Smaller CPU problems keep an FP64 MLX dense path. Metal remains FP32 in both

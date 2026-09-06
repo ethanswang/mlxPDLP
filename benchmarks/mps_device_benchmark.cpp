@@ -129,6 +129,8 @@ const char *termination_name(termination_reason_t reason) {
         return "FEAS_POLISH_SUCCESS";
     case TERMINATION_REASON_HOST_DOUBLE_HANDOFF:
         return "HOST_DOUBLE_HANDOFF";
+    case TERMINATION_REASON_NUMERICAL_ERROR:
+        return "NUMERICAL_ERROR";
     case TERMINATION_REASON_UNSPECIFIED:
         return "UNSPECIFIED";
     }
