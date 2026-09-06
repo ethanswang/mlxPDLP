@@ -7,6 +7,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 using namespace mlxpdlp;
 
@@ -15,7 +16,14 @@ static void require(bool condition, const char *message) {
         throw std::runtime_error(message);
 }
 
-static void spectral_regression(mx::Device device, bool conservative, int iteration_limit = 2000) {
+// Recovery can wait for non-finite arithmetic; rounding and restart decisions
+// shift that checkpoint. Leave room for convergence afterwards, while the
+// separate 200-iteration case checks that recovery respects a short budget.
+static constexpr int spectral_convergence_limit = 5000;
+
+static void spectral_regression(mx::Device device, bool conservative,
+                                int iteration_limit = spectral_convergence_limit,
+                                size_t direction_rank = 0) {
     constexpr int size = 16;
     constexpr double small_eigenvalue = 0.99;
     const double infinity = std::numeric_limits<double>::infinity();
@@ -28,21 +36,20 @@ static void spectral_regression(mx::Device device, bool conservative, int iterat
         value = normal(generator);
     }
 
-    // Choose a signed uniform unit vector almost orthogonal to that start.
+    // Rank signed uniform unit vectors almost orthogonal to that start.
     // A short exhaustive search makes this portable across normal_distribution
     // implementations, whose outputs are not specified by the C++ standard.
-    double smallest_dot = infinity;
-    unsigned best_mask = 0;
+    std::vector<std::pair<double, unsigned>> directions;
+    directions.reserve(1u << (size - 1));
     for (unsigned mask = 0; mask < (1u << (size - 1)); ++mask) {
         double dot = start[0];
         for (int j = 1; j < size; ++j) {
             dot += (((mask >> (j - 1)) & 1u) ? 1.0 : -1.0) * start[j];
         }
-        if (std::abs(dot) < smallest_dot) {
-            smallest_dot = std::abs(dot);
-            best_mask = mask;
-        }
+        directions.emplace_back(std::abs(dot), mask);
     }
+    std::sort(directions.begin(), directions.end());
+    const unsigned best_mask = directions.at(direction_rank).second;
     std::vector<double> exact(size, 1.0 / std::sqrt(size));
     for (int j = 1; j < size; ++j) {
         exact[j] *= ((best_mask >> (j - 1)) & 1u) ? 1.0 : -1.0;
@@ -86,8 +93,13 @@ static void spectral_regression(mx::Device device, bool conservative, int iterat
     }
     const auto reason = result->termination_reason;
     std::cout << (device.type == mx::Device::cpu ? "CPU" : "Metal")
-              << " conservative=" << conservative << " iterations=" << result->total_count
-              << " recoveries=" << state.step_size_reductions << " error=" << error << '\n';
+              << " conservative=" << conservative << " direction_rank=" << direction_rank
+              << " iterations=" << result->total_count
+              << " recoveries=" << state.step_size_reductions << " error=" << error
+              << " reason=" << static_cast<int>(reason)
+              << " primal=" << result->relative_primal_residual
+              << " dual=" << result->relative_dual_residual
+              << " gap=" << result->relative_objective_gap << '\n';
     const int count = result->total_count;
     mlxpdlp_result_free(result);
     require(finite, "spectral underestimation returned non-finite certificate");
@@ -270,6 +282,10 @@ int main(int argc, char **argv) {
         if (device.type == mx::Device::gpu && !mx::metal::is_available())
             return 77;
         spectral_regression(device, false);
+        // This equivalent direction reproduced CI's delayed recovery locally:
+        // one recovery, a small primal error, but an unconverged dual certificate.
+        if (device.type == mx::Device::cpu)
+            spectral_regression(device, false, spectral_convergence_limit, 7);
         spectral_regression(device, true);
         spectral_regression(device, false, 200);
         if (device.type == mx::Device::gpu)
