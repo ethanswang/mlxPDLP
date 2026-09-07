@@ -447,13 +447,10 @@ bool sparse_fused_unfused_match() {
     return valid;
 }
 
-bool sparse_fused_unfused_simdgroup_match() {
-    // Same agreement check as sparse_fused_unfused_match, but on a uniform
-    // 65-entry-row matrix so BOTH matrix directions dispatch to the
-    // simdgroup_rows fused kernel (the other agreement test covers the
-    // scalar-row and adaptive variants).
-    constexpr int size = 512;
-    constexpr int entries_per_row = 65;
+bool sparse_fused_unfused_uniform_match(int size, int entries_per_row,
+                                       SparseMetalSpmvStrategy expected_strategy) {
+    // Check both matrix directions, including a quad-row fixture whose final
+    // SIMD group and threadgroup are incomplete.
     constexpr double diagonal_value = 2.0;
     constexpr double off_diagonal_value = 0.01;
     const double row_sum =
@@ -508,12 +505,10 @@ bool sparse_fused_unfused_simdgroup_match() {
         mlxpdlp_result_t *result = solver.solve();
         // The dispatch strategies are selected during prepare_sparse_metal_backend
         // inside solve(); inspect them only after the solve.
-        if (solver.state().sparse_a_spmv_strategy !=
-                SparseMetalSpmvStrategy::simdgroup_rows ||
-            solver.state().sparse_at_spmv_strategy !=
-                SparseMetalSpmvStrategy::simdgroup_rows) {
+        if (solver.state().sparse_a_spmv_strategy != expected_strategy ||
+            solver.state().sparse_at_spmv_strategy != expected_strategy) {
             destroy_result(result);
-            throw std::runtime_error("fixture did not select the simdgroup-row strategy");
+            throw std::runtime_error("fixture did not select the requested row strategy");
         }
         return result;
     };
@@ -532,8 +527,8 @@ bool sparse_fused_unfused_simdgroup_match() {
         }
         valid = valid && fused->total_count == unfused->total_count;
     }
-    std::printf("MLX/GPU  fused/unfused SIMD-group iteration agreement %s\n",
-                valid ? "PASS" : "FAIL");
+    std::printf("MLX/GPU  fused/unfused %d-entry rows iteration agreement %s\n",
+                entries_per_row, valid ? "PASS" : "FAIL");
     destroy_result(fused);
     destroy_result(unfused);
     return valid;
@@ -653,7 +648,7 @@ bool sparse_fused_short_dimension_boundary_match() {
 
 bool spmv_simdgroup_threshold_override() {
     // A uniform 32-entry-row matrix lies below the default SIMD-group
-    // aggregate-work cutoff (adaptive path), but above a small explicit
+    // aggregate-work cutoff (quad-row path), but above a small explicit
     // MLXPDLP_SPMV_SIMD_NNZ_THRESHOLD override (SIMD-group path). The override
     // must actually change the selected dispatch strategy.
     constexpr int size = 512;
@@ -702,6 +697,7 @@ bool spmv_simdgroup_threshold_override() {
 
     const SparseMetalSpmvStrategy default_strategy = solve_with_strategy();
     if (default_strategy != SparseMetalSpmvStrategy::adaptive &&
+        default_strategy != SparseMetalSpmvStrategy::quad_rows &&
         default_strategy != SparseMetalSpmvStrategy::simdgroup_rows) {
         std::printf("MLX/GPU  SpMV SIMD-group threshold override SKIP (default=%d)\n",
                     static_cast<int>(default_strategy));
@@ -1002,7 +998,8 @@ int main() {
         std::fprintf(stderr, "fused/unfused Metal iteration regression failed\n");
         return 1;
     }
-    if (!sparse_fused_unfused_simdgroup_match()) {
+    if (!sparse_fused_unfused_uniform_match(512, 65, SparseMetalSpmvStrategy::simdgroup_rows) ||
+        !sparse_fused_unfused_uniform_match(513, 32, SparseMetalSpmvStrategy::quad_rows)) {
         std::fprintf(stderr, "fused/unfused SIMD-group Metal iteration regression failed\n");
         return 1;
     }

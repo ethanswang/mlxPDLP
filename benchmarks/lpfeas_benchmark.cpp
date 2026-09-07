@@ -815,8 +815,8 @@ std::string utc_timestamp() {
 }
 
 void warm_up_metal() {
-    // Cross the sparse-selection threshold and include both adaptive-kernel
-    // branches: row zero is long, while the remaining rows are packed short
+    // Cross the sparse-selection threshold and include adaptive SIMD-group
+    // and scalar work: row zero has 65 entries, while the remaining rows are short
     // rows. Each worker calls this on its own thread-local Metal stream before
     // timed instances begin.
     constexpr int rows = 65;
@@ -865,39 +865,49 @@ void warm_up_metal() {
         if (!solver.state().sparse_metal_active || !result)
             throw std::runtime_error("Metal sparse warmup failed");
     };
-    run(rows, columns, row_ptr, col_ind, values);
-
-    // Prime the opposite scalar/adaptive orientation as well. A^T uses the
-    // primal half-step kernels, so warming only A's strategy misses variants.
-    std::vector<int> transpose_rows(columns + 1, 0), transpose_columns(col_ind.size());
-    std::vector<double> transpose_values(values.size());
-    for (int column : col_ind)
-        ++transpose_rows[column + 1];
-    for (int column = 0; column < columns; ++column)
-        transpose_rows[column + 1] += transpose_rows[column];
-    auto next = transpose_rows;
-    for (int row = 0; row < rows; ++row) {
-        for (int entry = row_ptr[row]; entry < row_ptr[row + 1]; ++entry) {
-            const int index = next[col_ind[entry]]++;
-            transpose_columns[index] = row;
-            transpose_values[index] = values[entry];
+    auto run_both_orientations = [&](int rows, int columns, const std::vector<int> &row_ptr,
+                                     const std::vector<int> &col_ind,
+                                     const std::vector<double> &values) {
+        run(rows, columns, row_ptr, col_ind, values);
+        std::vector<int> transpose_rows(columns + 1, 0), transpose_columns(col_ind.size());
+        std::vector<double> transpose_values(values.size());
+        for (int column : col_ind) ++transpose_rows[column + 1];
+        for (int column = 0; column < columns; ++column)
+            transpose_rows[column + 1] += transpose_rows[column];
+        auto next = transpose_rows;
+        for (int row = 0; row < rows; ++row) {
+            for (int entry = row_ptr[row]; entry < row_ptr[row + 1]; ++entry) {
+                const int index = next[col_ind[entry]]++;
+                transpose_columns[index] = row;
+                transpose_values[index] = values[entry];
+            }
         }
-    }
-    run(columns, rows, transpose_rows, transpose_columns, transpose_values);
+        run(columns, rows, transpose_rows, transpose_columns, transpose_values);
+    };
+    run_both_orientations(rows, columns, row_ptr, col_ind, values);
 
-    // Both orientations select SIMD-group SpMV and fused half-steps here.
-    constexpr int uniform_size = 512, row_length = 96;
-    std::vector<int> uniform_rows(uniform_size + 1), uniform_columns;
-    std::vector<double> uniform_values;
-    for (int row = 0; row < uniform_size; ++row) {
-        uniform_rows[row] = static_cast<int>(uniform_values.size());
-        for (int offset = 0; offset < row_length; ++offset) {
-            uniform_columns.push_back((row + offset) % uniform_size);
-            uniform_values.push_back(1.0);
+    // Padding with unused columns selects 32-bit indices without increasing
+    // the nonzero count. Prime both widths before parallel workers start.
+    constexpr int wide_columns = 65537;
+    run_both_orientations(rows, wide_columns, row_ptr, col_ind, values);
+
+    // Prime quad-row and SIMD-group SpMV plus both fused half-steps.
+    constexpr int uniform_size = 512;
+    for (int row_length : {32, 96}) {
+        std::vector<int> uniform_rows(uniform_size + 1), uniform_columns;
+        std::vector<double> uniform_values;
+        for (int row = 0; row < uniform_size; ++row) {
+            uniform_rows[row] = static_cast<int>(uniform_values.size());
+            for (int offset = 0; offset < row_length; ++offset) {
+                uniform_columns.push_back((row + offset) % uniform_size);
+                uniform_values.push_back(1.0);
+            }
         }
+        uniform_rows[uniform_size] = static_cast<int>(uniform_values.size());
+        run(uniform_size, uniform_size, uniform_rows, uniform_columns, uniform_values);
+        run_both_orientations(uniform_size, wide_columns, uniform_rows,
+                              uniform_columns, uniform_values);
     }
-    uniform_rows[uniform_size] = static_cast<int>(uniform_values.size());
-    run(uniform_size, uniform_size, uniform_rows, uniform_columns, uniform_values);
 }
 
 double validation_merit(const RunRecord &record) {

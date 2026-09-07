@@ -244,7 +244,10 @@ int main(int argc, char **argv) {
         double dense_mib = 2.0 * problem->num_constraints * problem->num_variables * sizeof(float) /
                            (1024.0 * 1024.0);
         double sparse_mib =
-            (2.0 * problem->num_nonzeros * (sizeof(float) + sizeof(int32_t)) +
+            (problem->num_nonzeros *
+                 (2.0 * sizeof(float) +
+                  (problem->num_variables <= 65536 ? sizeof(uint16_t) : sizeof(int32_t)) +
+                  (problem->num_constraints <= 65536 ? sizeof(uint16_t) : sizeof(int32_t))) +
              (problem->num_constraints + problem->num_variables + 2.0) * sizeof(int32_t)) /
             (1024.0 * 1024.0);
         std::printf("mlxPDLP fixed-work MPS benchmark\n");

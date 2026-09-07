@@ -191,6 +191,7 @@ enum class SparseMetalSpmvStrategy : uint8_t {
     scalar_rows,
     simdgroup_rows,
     adaptive,
+    quad_rows,
 };
 
 struct MlxPdlpState {

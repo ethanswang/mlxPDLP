@@ -63,6 +63,7 @@ loader uses globally visible `mlxpdlp_`-prefixed names.
 |---|---|
 | `include/mlxPDLP/solver.h` | Public solver types, state, and `MlxPdlpSolver` API |
 | `src/solver.cpp` | MLX-backed PDHG implementation |
+| `src/metal_spmv.h` | Shared Metal CSR work descriptors, reductions, and standalone dispatch |
 | `src/pdhg_control.h` | Shared guarded PID/HPR updates and numerical-metric checks |
 | `src/cpu_sparse_matrix.h` | Accelerate sparse matrix ownership shared by CPU PDHG and FP64 continuation |
 | `src/host_double_polish.cpp` | Bounded host FP64 certificate correction and continuation |
@@ -80,9 +81,11 @@ loader uses globally visible `mlxpdlp_`-prefixed names.
 | `tests/test_solver.cpp` | Solver regression tests |
 | `tests/test_pdhg_safeguards.cpp` | Adversarial spectral, controller, precision-feedback, and native-continuation regressions |
 | `tests/test_device_comparison.cpp` | Analytic and sparse duplicate-coordinate CPU/GPU comparison |
+| `tests/test_metal_spmv.cpp` | Direct Metal CSR products against independent FP64 sums |
 | `tests/test_mps_device_comparison.cpp` | Netlib ADLITTLE CPU/GPU comparison |
 | `tests/data/netlib` | Vendored ADLITTLE MPS benchmark and provenance |
 | `benchmarks/mps_device_benchmark.cpp` | Fixed-work MPS CPU/Metal benchmark |
+| `benchmarks/spmv_benchmark.cpp` | Production Metal CSR kernel timing and FP64 reference checks |
 | `benchmarks/lpfeas_benchmark.cpp` | Manifest-driven LPfeas Metal protocol runner |
 | `benchmarks/lpfeas_support.cpp` | Original-model float64 certificate verifier |
 | `benchmarks/compare_lpfeas.py` | Cross-system comparison with published B200 GPU times |
@@ -391,16 +394,27 @@ matrix-vector products preserve their additive semantics.
 
 ### Matrix-vector products
 
-Three dispatch strategies are selected per matrix direction from the CSR row
+Four dispatch strategies are selected per matrix direction from the CSR row
 profile:
 
 - `scalar_rows`: one thread per row with a serial FMA loop (rows up to 16
-  nonzeros);
+  nonzeros, or at most 64 with an average no greater than eight);
+- `quad_rows`: four adjacent lanes per row with two shuffle reductions for
+  moderately uniform short rows;
 - `simdgroup_rows`: one 32-lane SIMD group per row with a strided loop and
   `simd_sum` (uniform medium rows);
-- `adaptive`: short rows (up to 64 nonzeros) packed 256 per threadgroup, long
-  rows reduced cooperatively by a whole 256-thread group through shared
-  memory.
+- `adaptive`: scalar rows packed 256 per threadgroup, quad rows packed 64,
+  medium rows (65–4096 nonzeros) packed eight SIMD groups per threadgroup,
+  and longer rows reduced by a whole 256-thread group. The quad bucket is
+  enabled only when the population of rows up to 64 entries averages at least
+  24 entries; otherwise that population retains scalar accumulation. Long
+  rows use SIMD sums, eight shared partials, and one threadgroup barrier.
+
+`src/metal_spmv.h` shares the work descriptors and reduction bodies between
+standalone products and fused updates. Each direction stores column indices
+as unsigned 16-bit integers when its input dimension is at most 65,536;
+otherwise it uses 32-bit indices. This changes integer storage only. Values
+remain FP32, and host CSR indices and GPU row pointers remain 32-bit.
 
 The SIMD-group crossover threshold is device-tuned (the 8M-nonzero default was
 measured on an M3 Max; wider or narrower GPU families shift it) and can be
@@ -413,7 +427,7 @@ matrix-vector product in an MLX primitive.
 On the sparse Metal path, each PDHG half-step runs as one fused kernel: CSR
 SpMV, scaled gradient step, bound projection, reflection, Halpern weighting,
 and (on major iterations) the `x_pdhg`/`y_pdhg`/`dual_slack` snapshots in a
-single dispatch. Each of the three dispatch strategies in each direction has
+single dispatch. Each of the four dispatch strategies in each direction has
 a major and minor variant. Major primal/dual kernels expose four/three
 outputs; minor kernels expose only `x_cur`/`x_ref` or `y_cur`/`y_ref`, avoiding
 three discarded snapshot-buffer allocations per minor iteration. The shared
@@ -1049,7 +1063,8 @@ CTest registers:
 | `mlx_basic` | Basic MLX CPU array operations |
 | `solver` | Solver, warm-start, presolve, postsolve, termination, and FP64 Farkas infeasibility-certificate regressions |
 | `pdhg_safeguards_cpu`, `pdhg_safeguards_metal` | Underestimated spectral norm, bounded recovery, conservative steps, PID/HPR guards, FP64 feedback, and native continuation |
-| `device_comparison` | Analytic and sparse LPs on CPU and GPU, fused/unfused iteration agreement across all three SpMV strategies, SIMD-group threshold override, infeasibility tolerance independence and false-status regressions on CPU/Metal, FP32 Metal infeasibility certificates, and sparse-Metal certificate cadence |
+| `metal_spmv` | Independent FP64 reference checks for all four row mappings, both orientations, empty/duplicate/cancelling rows, incomplete work packs, and 16-/32-bit index boundaries |
+| `device_comparison` | Analytic and sparse LPs on CPU and GPU, fused/unfused iteration agreement across all four SpMV strategies, SIMD-group threshold override, infeasibility tolerance independence and false-status regressions on CPU/Metal, FP32 Metal infeasibility certificates, and sparse-Metal certificate cadence |
 | `mps_device_comparison` | Bundled Netlib ADLITTLE MPS on CPU and GPU |
 | `netlib_regression_cpu` | Opt-in downloaded 40-case Netlib audit on CPU FP64 |
 | `netlib_regression_metal` | Opt-in downloaded 40-case Netlib audit on Metal FP32 |

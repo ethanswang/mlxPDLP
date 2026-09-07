@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "mlxPDLP/solver.h"
 #include "cpu_sparse_matrix.h"
+#include "metal_spmv.h"
 #include "pdhg_control.h"
 
 #include "mlx/allocator.h"
@@ -837,18 +838,12 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
     }
 
     sparse_a_row_ptr_ = mx::array(sparse_a_row_ptr_host_.data(), {s_.m + 1}, mx::int32);
-    sparse_a_col_ind_ = mx::array(sparse_a_col_ind_host_.data(), {sparse_nnz}, mx::int32);
+    sparse_a_col_ind_ = detail::metal_column_indices(sparse_a_col_ind_host_, s_.n);
     sparse_a_values_ = mx::array(matrix_values.data(), {sparse_nnz}, mx::float32);
 
     sparse_at_row_ptr_ = mx::array(sparse_at_row_ptr_host_.data(), {s_.n + 1}, mx::int32);
-    sparse_at_col_ind_ = mx::array(sparse_at_col_ind_host_.data(), {sparse_nnz}, mx::int32);
+    sparse_at_col_ind_ = detail::metal_column_indices(sparse_at_col_ind_host_, s_.m);
     sparse_at_values_ = mx::array(transpose_values.data(), {sparse_nnz}, mx::float32);
-
-    struct AdaptiveWork {
-        std::vector<int32_t> offsets{0};
-        std::vector<int32_t> rows;
-        int item_count = 0;
-    };
 
     struct RowProfile {
         int rows = 0;
@@ -938,12 +933,26 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
             }
             return static_cast<int64_t>(8.0 * 1024.0 * 1024.0 * family_factor);
         }();
-        if (profile.max_row_nonzeros <= scalar_row_max_nonzeros) {
+        // A few rows just above 16 entries do not justify descriptor gathers
+        // for every row of an otherwise very short-row matrix (e.g. A^T of
+        // S82 and S250R10). Keep their original CSR order and serial sums.
+        const bool mostly_tiny_rows = profile.max_row_nonzeros <= 64 &&
+            static_cast<int64_t>(profile.nonzeros) <= 8LL * profile.rows;
+        if (profile.max_row_nonzeros <= scalar_row_max_nonzeros || mostly_tiny_rows) {
             return SparseMetalSpmvStrategy::scalar_rows;
         }
 
         const int64_t rows = profile.rows;
         const int64_t nonzeros = profile.nonzeros;
+        // Four contiguous lanes coalesce short CSR rows without spending a
+        // full SIMD group on each output. Keep the full-group mapping once
+        // the aggregate work reaches its streaming crossover.
+        const bool quad_workload = nonzeros <= 64 * rows ||
+            (nonzeros >= (1 << 18) && nonzeros <= 96 * rows);
+        if (nonzeros >= 24 * rows && quad_workload &&
+            profile.max_row_nonzeros <= 128 && nonzeros < simdgroup_nnz_threshold) {
+            return SparseMetalSpmvStrategy::quad_rows;
+        }
         const bool medium_workload =
             nonzeros >= 32 * rows && nonzeros <= 512 * rows &&
             static_cast<int64_t>(profile.tiny_rows) * 2 < rows;
@@ -958,65 +967,6 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
         return SparseMetalSpmvStrategy::adaptive;
     };
 
-    auto build_adaptive_work = [](const std::vector<int32_t> &row_ptr, int row_count) {
-        constexpr int short_row_max_nonzeros = 64;
-        constexpr int medium_row_max_nonzeros = 4096;
-        constexpr int medium_row_marker = 1 << 30;
-        constexpr size_t simdgroup_width = 32;
-        constexpr size_t threadgroup_width = 256;
-        constexpr size_t simdgroups_per_threadgroup =
-            threadgroup_width / simdgroup_width;
-        std::vector<int32_t> short_rows;
-        std::vector<int32_t> medium_rows;
-        std::vector<int32_t> long_rows;
-        short_rows.reserve(static_cast<size_t>(row_count));
-        for (int row = 0; row < row_count; ++row) {
-            const int length = row_ptr[static_cast<size_t>(row) + 1] -
-                               row_ptr[static_cast<size_t>(row)];
-            if (length <= short_row_max_nonzeros) {
-                short_rows.push_back(row);
-            } else if (length <= medium_row_max_nonzeros) {
-                medium_rows.push_back(row);
-            } else {
-                long_rows.push_back(row);
-            }
-        }
-
-        AdaptiveWork work;
-        work.rows.reserve(short_rows.size() + medium_rows.size() + long_rows.size());
-        work.offsets.reserve((short_rows.size() + threadgroup_width - 1) /
-                                 threadgroup_width +
-                             (medium_rows.size() + simdgroups_per_threadgroup - 1) /
-                                 simdgroups_per_threadgroup +
-                             long_rows.size() + 1);
-        for (size_t begin = 0; begin < short_rows.size(); begin += threadgroup_width) {
-            const size_t end =
-                std::min(begin + threadgroup_width, short_rows.size());
-            work.rows.insert(work.rows.end(), short_rows.begin() + begin,
-                             short_rows.begin() + end);
-            work.offsets.push_back(static_cast<int32_t>(work.rows.size()));
-        }
-        for (size_t begin = 0; begin < medium_rows.size();
-             begin += simdgroups_per_threadgroup) {
-            const size_t end =
-                std::min(begin + simdgroups_per_threadgroup, medium_rows.size());
-            for (size_t index = begin; index < end; ++index) {
-                // A second negative range marks packs where each SIMD group
-                // cooperatively reduces one medium row. This keeps -row-1
-                // available for the full-threadgroup long-row reducer.
-                work.rows.push_back(-medium_row_marker - medium_rows[index] - 1);
-            }
-            work.offsets.push_back(static_cast<int32_t>(work.rows.size()));
-        }
-        for (int32_t row : long_rows) {
-            // Negative descriptors distinguish a cooperatively reduced long
-            // row from a pack of independently accumulated short rows.
-            work.rows.push_back(-row - 1);
-            work.offsets.push_back(static_cast<int32_t>(work.rows.size()));
-        }
-        work.item_count = static_cast<int>(work.offsets.size()) - 1;
-        return work;
-    };
 
     s_.sparse_a_spmv_strategy =
         select_strategy(profile_rows(sparse_a_row_ptr_host_, s_.m));
@@ -1030,7 +980,7 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
         if (strategy != SparseMetalSpmvStrategy::adaptive) {
             return;
         }
-        const AdaptiveWork work = build_adaptive_work(row_ptr, row_count);
+        const auto work = detail::make_adaptive_metal_work(row_ptr, row_count);
         work_offsets = mx::array(work.offsets.data(),
                                  {static_cast<int>(work.offsets.size())}, mx::int32);
         work_rows = mx::array(work.rows.data(),
@@ -1052,6 +1002,8 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
             switch (strategy) {
             case SparseMetalSpmvStrategy::scalar_rows:
                 return "scalar-row";
+            case SparseMetalSpmvStrategy::quad_rows:
+                return "quad-row";
             case SparseMetalSpmvStrategy::simdgroup_rows:
                 return "SIMD-group-row";
             case SparseMetalSpmvStrategy::adaptive:
@@ -1059,7 +1011,8 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
             }
             return "unknown";
         };
-        double sparse_mib = (2.0 * sparse_nnz * (sizeof(float) + sizeof(int32_t)) +
+        double sparse_mib = (2.0 * sparse_nnz * sizeof(float) +
+                             sparse_a_col_ind_.nbytes() + sparse_at_col_ind_.nbytes() +
                              (static_cast<double>(s_.m) + s_.n + 2.0) * sizeof(int32_t)) /
                             (1024.0 * 1024.0);
         printf("  sparse Metal SpMV enabled (CSR + transpose CSR: %.2f MiB; "
@@ -1105,128 +1058,8 @@ mx::array MlxPdlpSolver::sparse_matvec(const mx::array &row_ptr, const mx::array
                                        const mx::array &work_rows, const mx::array &x,
                                        int rows, int work_item_count,
                                        SparseMetalSpmvStrategy strategy) {
-    constexpr int threadgroup_width = 256;
-
-    if (strategy == SparseMetalSpmvStrategy::scalar_rows) {
-        static const auto scalar_kernel = mx::fast::metal_kernel(
-            "mlxpdlp_csr_spmv_scalar_rows",
-            {"row_starts", "column_indices", "nonzeros", "vector"},
-            {"output"},
-            R"(
-                uint row = thread_position_in_grid.x;
-                float total = 0.0f;
-                int begin = row_starts[row];
-                int end = row_starts[row + 1];
-                for (int k = begin; k < end; ++k) {
-                    total = fma(nonzeros[k], vector[column_indices[k]], total);
-                }
-                output[row] = total;
-            )");
-        return scalar_kernel({row_ptr, col_ind, values, x}, {{rows}}, {mx::float32},
-                             {rows, 1, 1}, {threadgroup_width, 1, 1}, {},
-                             std::nullopt, false, s_.stream)[0];
-    }
-
-    if (strategy == SparseMetalSpmvStrategy::simdgroup_rows) {
-        static const auto simdgroup_kernel = mx::fast::metal_kernel(
-            "mlxpdlp_csr_spmv_simdgroup_rows",
-            {"row_starts", "column_indices", "nonzeros", "vector"},
-            {"output"},
-            R"(
-                constexpr uint simdgroup_width = 32;
-                uint lane = thread_index_in_simdgroup;
-                uint row = thread_position_in_grid.x / simdgroup_width;
-                float partial = 0.0f;
-                int begin = row_starts[row];
-                int end = row_starts[row + 1];
-                for (int k = begin + int(lane); k < end;
-                     k += int(simdgroup_width)) {
-                    partial = fma(nonzeros[k], vector[column_indices[k]], partial);
-                }
-                float total = simd_sum(partial);
-                if (lane == 0) {
-                    output[row] = total;
-                }
-            )");
-        const int grid = rows * 32;
-        return simdgroup_kernel({row_ptr, col_ind, values, x}, {{rows}},
-                                {mx::float32}, {grid, 1, 1},
-                                {threadgroup_width, 1, 1}, {}, std::nullopt,
-                                false, s_.stream)[0];
-    }
-
-    static const auto adaptive_kernel = mx::fast::metal_kernel(
-        "mlxpdlp_csr_spmv_adaptive",
-        {"row_starts", "column_indices", "nonzeros", "work_offsets", "work_rows", "vector"},
-        {"output"},
-        R"(
-            uint local_thread = thread_index_in_threadgroup;
-            uint threadgroup_width = threads_per_threadgroup.x;
-            uint work_item = threadgroup_position_in_grid.x;
-            int descriptor_begin = work_offsets[work_item];
-            int descriptor_end = work_offsets[work_item + 1];
-            int first_row = work_rows[descriptor_begin];
-            threadgroup float partials[256];
-
-            constexpr int medium_row_marker = 1073741824;
-            if (first_row < -medium_row_marker) {
-                uint simd_lane = local_thread & 31;
-                uint simd_group = local_thread >> 5;
-                int descriptor = descriptor_begin + int(simd_group);
-                if (descriptor < descriptor_end) {
-                    uint row = uint(-work_rows[descriptor] - medium_row_marker - 1);
-                    float total = 0.0f;
-                    int begin = row_starts[row];
-                    int end = row_starts[row + 1];
-                    for (int k = begin + int(simd_lane); k < end; k += 32) {
-                        total = fma(nonzeros[k], vector[column_indices[k]], total);
-                    }
-                    total = simd_sum(total);
-                    if (simd_lane == 0) {
-                        output[row] = total;
-                    }
-                }
-            } else if (first_row < 0) {
-                uint row = uint(-first_row - 1);
-                float partial = 0.0f;
-                int begin = row_starts[row];
-                int end = row_starts[row + 1];
-                for (int k = begin + int(local_thread); k < end;
-                     k += int(threadgroup_width)) {
-                    partial = fma(nonzeros[k], vector[column_indices[k]], partial);
-                }
-                partials[local_thread] = partial;
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                for (uint stride = 128; stride > 0; stride >>= 1) {
-                    if (local_thread < stride) {
-                        partials[local_thread] += partials[local_thread + stride];
-                    }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-                }
-                if (local_thread == 0) {
-                    output[row] = partials[0];
-                }
-            } else {
-                int descriptor = descriptor_begin + int(local_thread);
-                if (descriptor < descriptor_end) {
-                    uint row = uint(work_rows[descriptor]);
-                    float total = 0.0f;
-                    int begin = row_starts[row];
-                    int end = row_starts[row + 1];
-                    for (int k = begin; k < end; ++k) {
-                        total = fma(nonzeros[k], vector[column_indices[k]], total);
-                    }
-                    output[row] = total;
-                }
-            }
-        )");
-
-    int grid = work_item_count * threadgroup_width;
-    int threadgroup = threadgroup_width;
-    return adaptive_kernel({row_ptr, col_ind, values, work_offsets, work_rows, x},
-                           {{rows}}, {mx::float32}, {grid, 1, 1},
-                           {threadgroup, 1, 1}, {}, std::nullopt, false,
-                           s_.stream)[0];
+    return detail::metal_spmv(row_ptr, col_ind, values, work_offsets, work_rows, x,
+                              rows, work_item_count, strategy, s_.stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -1372,151 +1205,17 @@ inline void fused_dual_minor_update(
 )";
     return header.c_str();
 }
-std::string replace_all(std::string text, const std::string &from, const std::string &to) {
-    size_t pos = 0;
-    while ((pos = text.find(from, pos)) != std::string::npos) {
-        text.replace(pos, from.size(), to);
-        pos += to.size();
-    }
-    return text;
-}
-
-// Assemble the kernel body for one SpMV dispatch strategy. The RS/CI/VALS
-// tokens name the CSR arrays, VEC the operand vector, WO/WR the adaptive work
-// arrays, UPD the update call using register accumulator acc, and UPD_LONG
-// the update call using the reduced threadgroup value partials[0].
-std::string fused_body(const char *rs, const char *ci, const char *vals,
-                       const char *wo, const char *wr, const char *vec,
-                       SparseMetalSpmvStrategy strategy,
-                       const std::string &update_acc,
-                       const std::string &update_partials) {
-    std::string body;
-    switch (strategy) {
-    case SparseMetalSpmvStrategy::scalar_rows:
-        body = R"(
-            uint row = thread_position_in_grid.x;
-            float acc = 0.0f;
-            int begin = $RS$[row];
-            int end = $RS$[row + 1];
-            for (int k = begin; k < end; ++k) {
-                acc = fma($VALS$[k], $VEC$[$CI$[k]], acc);
-            }
-            $UPD$
-        )";
-        break;
-    case SparseMetalSpmvStrategy::simdgroup_rows:
-        body = R"(
-            constexpr uint simdgroup_width = 32;
-            uint lane = thread_index_in_simdgroup;
-            uint row = thread_position_in_grid.x / simdgroup_width;
-            float partial = 0.0f;
-            int begin = $RS$[row];
-            int end = $RS$[row + 1];
-            for (int k = begin + int(lane); k < end; k += int(simdgroup_width)) {
-                partial = fma($VALS$[k], $VEC$[$CI$[k]], partial);
-            }
-            float acc = simd_sum(partial);
-            if (lane == 0) {
-                $UPD$
-            }
-        )";
-        break;
-    case SparseMetalSpmvStrategy::adaptive:
-        body = R"(
-            uint local_thread = thread_index_in_threadgroup;
-            uint threadgroup_width = threads_per_threadgroup.x;
-            uint work_item = threadgroup_position_in_grid.x;
-            int descriptor_begin = $WO$[work_item];
-            int descriptor_end = $WO$[work_item + 1];
-            int first_row = $WR$[descriptor_begin];
-            threadgroup float partials[256];
-            constexpr int medium_row_marker = 1073741824;
-            if (first_row < -medium_row_marker) {
-                uint simd_lane = local_thread & 31;
-                uint simd_group = local_thread >> 5;
-                int descriptor = descriptor_begin + int(simd_group);
-                if (descriptor < descriptor_end) {
-                    uint row = uint(-$WR$[descriptor] - medium_row_marker - 1);
-                    float acc = 0.0f;
-                    int begin = $RS$[row];
-                    int end = $RS$[row + 1];
-                    for (int k = begin + int(simd_lane); k < end; k += 32) {
-                        acc = fma($VALS$[k], $VEC$[$CI$[k]], acc);
-                    }
-                    acc = simd_sum(acc);
-                    if (simd_lane == 0) {
-                        $UPD$
-                    }
-                }
-            } else if (first_row < 0) {
-                uint row = uint(-first_row - 1);
-                float partial = 0.0f;
-                int begin = $RS$[row];
-                int end = $RS$[row + 1];
-                for (int k = begin + int(local_thread); k < end;
-                     k += int(threadgroup_width)) {
-                    partial = fma($VALS$[k], $VEC$[$CI$[k]], partial);
-                }
-                partials[local_thread] = partial;
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                for (uint stride = 128; stride > 0; stride >>= 1) {
-                    if (local_thread < stride) {
-                        partials[local_thread] += partials[local_thread + stride];
-                    }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-                }
-                if (local_thread == 0) {
-                    $UPD_LONG$
-                }
-            } else {
-                int descriptor = descriptor_begin + int(local_thread);
-                if (descriptor < descriptor_end) {
-                    uint row = uint($WR$[descriptor]);
-                    float acc = 0.0f;
-                    int begin = $RS$[row];
-                    int end = $RS$[row + 1];
-                    for (int k = begin; k < end; ++k) {
-                        acc = fma($VALS$[k], $VEC$[$CI$[k]], acc);
-                    }
-                    $UPD$
-                }
-            }
-        )";
-        break;
-    }
-    body = replace_all(std::move(body), "$RS$", rs);
-    body = replace_all(std::move(body), "$CI$", ci);
-    body = replace_all(std::move(body), "$VALS$", vals);
-    body = replace_all(std::move(body), "$WO$", wo);
-    body = replace_all(std::move(body), "$WR$", wr);
-    body = replace_all(std::move(body), "$VEC$", vec);
-    body = replace_all(std::move(body), "$UPD_LONG$", update_partials);
-    body = replace_all(std::move(body), "$UPD$", update_acc);
-    return body;
-}
 const std::string primal_major_update_acc =
     "fused_primal_major_update(row, acc, x_cur, x_init, obj, var_lb, var_ub, scalars, "
     "x_cur_out, x_ref_out, x_pdhg_out, dual_slack_out);";
-const std::string primal_major_update_partials =
-    "fused_primal_major_update(row, partials[0], x_cur, x_init, obj, var_lb, var_ub, "
-    "scalars, x_cur_out, x_ref_out, x_pdhg_out, dual_slack_out);";
 const std::string primal_minor_update_acc =
     "fused_primal_minor_update(row, acc, x_cur, x_init, obj, var_lb, var_ub, scalars, "
     "x_cur_out, x_ref_out);";
-const std::string primal_minor_update_partials =
-    "fused_primal_minor_update(row, partials[0], x_cur, x_init, obj, var_lb, var_ub, "
-    "scalars, x_cur_out, x_ref_out);";
 const std::string dual_major_update_acc =
     "fused_dual_major_update(row, acc, y_cur, y_init, con_lb, con_ub, scalars, "
     "y_cur_out, y_ref_out, y_pdhg_out);";
-const std::string dual_major_update_partials =
-    "fused_dual_major_update(row, partials[0], y_cur, y_init, con_lb, con_ub, scalars, "
-    "y_cur_out, y_ref_out, y_pdhg_out);";
 const std::string dual_minor_update_acc =
     "fused_dual_minor_update(row, acc, y_cur, y_init, con_lb, con_ub, scalars, "
-    "y_cur_out);";
-const std::string dual_minor_update_partials =
-    "fused_dual_minor_update(row, partials[0], y_cur, y_init, con_lb, con_ub, scalars, "
     "y_cur_out);";
 
 struct FusedKernelVariants {
@@ -1533,15 +1232,13 @@ FusedKernelVariants make_primal_fused_kernels(
         mx::fast::metal_kernel(
             base_name + "_major", input_names,
             {"x_cur_out", "x_ref_out", "x_pdhg_out", "dual_slack_out"},
-            fused_body(row_starts, column_indices, values, work_offsets,
-                       work_rows, vector, strategy, primal_major_update_acc,
-                       primal_major_update_partials),
+            detail::metal_spmv_body(row_starts, column_indices, values, work_offsets,
+                       work_rows, vector, strategy, primal_major_update_acc),
             fused_step_header()),
         mx::fast::metal_kernel(
             base_name + "_minor", input_names, {"x_cur_out", "x_ref_out"},
-            fused_body(row_starts, column_indices, values, work_offsets,
-                       work_rows, vector, strategy, primal_minor_update_acc,
-                       primal_minor_update_partials),
+            detail::metal_spmv_body(row_starts, column_indices, values, work_offsets,
+                       work_rows, vector, strategy, primal_minor_update_acc),
             fused_step_header()),
     };
 }
@@ -1555,15 +1252,13 @@ FusedKernelVariants make_dual_fused_kernels(
         mx::fast::metal_kernel(
             base_name + "_major", input_names,
             {"y_cur_out", "y_ref_out", "y_pdhg_out"},
-            fused_body(row_starts, column_indices, values, work_offsets,
-                       work_rows, vector, strategy, dual_major_update_acc,
-                       dual_major_update_partials),
+            detail::metal_spmv_body(row_starts, column_indices, values, work_offsets,
+                       work_rows, vector, strategy, dual_major_update_acc),
             fused_step_header()),
         mx::fast::metal_kernel(
             base_name + "_minor", input_names, {"y_cur_out"},
-            fused_body(row_starts, column_indices, values, work_offsets,
-                       work_rows, vector, strategy, dual_minor_update_acc,
-                       dual_minor_update_partials),
+            detail::metal_spmv_body(row_starts, column_indices, values, work_offsets,
+                       work_rows, vector, strategy, dual_minor_update_acc),
             fused_step_header()),
     };
 }
@@ -1592,6 +1287,7 @@ std::vector<mx::array> MlxPdlpSolver::fused_primal_step(
         grid_size = s_.n;
         break;
     }
+    case SparseMetalSpmvStrategy::quad_rows:
     case SparseMetalSpmvStrategy::simdgroup_rows: {
         static const auto variants = make_primal_fused_kernels(
             "mlxpdlp_fused_primal_simdgroup_rows",
@@ -1599,11 +1295,18 @@ std::vector<mx::array> MlxPdlpSolver::fused_primal_step(
              "x_init", "obj", "var_lb", "var_ub", "scalars"},
             "at_row_starts", "at_col_ind", "at_values", "at_work_offsets",
             "at_work_rows", "y_cur", SparseMetalSpmvStrategy::simdgroup_rows);
-        kernels = &variants;
+        static const auto quad_variants = make_primal_fused_kernels(
+            "mlxpdlp_fused_primal_quad_rows",
+            {"at_row_starts", "at_col_ind", "at_values", "y_cur", "x_cur",
+             "x_init", "obj", "var_lb", "var_ub", "scalars"},
+            "at_row_starts", "at_col_ind", "at_values", "at_work_offsets",
+            "at_work_rows", "y_cur", SparseMetalSpmvStrategy::quad_rows);
+        const bool quad = s_.sparse_at_spmv_strategy == SparseMetalSpmvStrategy::quad_rows;
+        kernels = quad ? &quad_variants : &variants;
         inputs = {sparse_at_row_ptr_, sparse_at_col_ind_, sparse_at_values_,
                   s_.y_cur, s_.x_cur, s_.x_init, s_.obj, s_.var_lb,
                   s_.var_ub, scalars};
-        grid_size = s_.n * 32;
+        grid_size = s_.n * (quad ? 4 : 32);
         break;
     }
     case SparseMetalSpmvStrategy::adaptive: {
@@ -1660,6 +1363,7 @@ std::vector<mx::array> MlxPdlpSolver::fused_dual_step(
         grid_size = s_.m;
         break;
     }
+    case SparseMetalSpmvStrategy::quad_rows:
     case SparseMetalSpmvStrategy::simdgroup_rows: {
         static const auto variants = make_dual_fused_kernels(
             "mlxpdlp_fused_dual_simdgroup_rows",
@@ -1667,10 +1371,17 @@ std::vector<mx::array> MlxPdlpSolver::fused_dual_step(
              "y_init", "con_lb", "con_ub", "scalars"},
             "a_row_starts", "a_col_ind", "a_values", "a_work_offsets",
             "a_work_rows", "x_ref", SparseMetalSpmvStrategy::simdgroup_rows);
-        kernels = &variants;
+        static const auto quad_variants = make_dual_fused_kernels(
+            "mlxpdlp_fused_dual_quad_rows",
+            {"a_row_starts", "a_col_ind", "a_values", "x_ref", "y_cur",
+             "y_init", "con_lb", "con_ub", "scalars"},
+            "a_row_starts", "a_col_ind", "a_values", "a_work_offsets",
+            "a_work_rows", "x_ref", SparseMetalSpmvStrategy::quad_rows);
+        const bool quad = s_.sparse_a_spmv_strategy == SparseMetalSpmvStrategy::quad_rows;
+        kernels = quad ? &quad_variants : &variants;
         inputs = {sparse_a_row_ptr_, sparse_a_col_ind_, sparse_a_values_, s_.x_ref,
                   s_.y_cur, s_.y_init, s_.con_lb, s_.con_ub, scalars};
-        grid_size = s_.m * 32;
+        grid_size = s_.m * (quad ? 4 : 32);
         break;
     }
     case SparseMetalSpmvStrategy::adaptive: {

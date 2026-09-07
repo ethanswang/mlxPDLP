@@ -274,6 +274,11 @@ if(MLXPDLP_BUILD_BENCHMARKS)
     )
     mlxpdlp_enable_warnings(mlxpdlp_mps_benchmark)
 
+    add_executable(mlxpdlp_spmv_benchmark benchmarks/spmv_benchmark.cpp)
+    target_include_directories(mlxpdlp_spmv_benchmark PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(mlxpdlp_spmv_benchmark PRIVATE mlxPDLP::solver mlxPDLP::mps)
+    mlxpdlp_enable_warnings(mlxpdlp_spmv_benchmark)
+
     add_executable(mlxpdlp_lpfeas_benchmark benchmarks/lpfeas_benchmark.cpp)
     add_custom_target(mlxpdlp_benchmark_provenance
         COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
@@ -284,6 +289,8 @@ if(MLXPDLP_BUILD_BENCHMARKS)
         BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/benchmark_provenance.h"
         VERBATIM)
     add_dependencies(mlxpdlp_lpfeas_benchmark mlxpdlp_benchmark_provenance)
+    add_dependencies(mlxpdlp_spmv_benchmark mlxpdlp_benchmark_provenance)
+    target_include_directories(mlxpdlp_spmv_benchmark PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_include_directories(mlxpdlp_lpfeas_benchmark PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(mlxpdlp_lpfeas_benchmark PRIVATE mlxpdlp_lpfeas_support)
     if(MLXPDLP_BUILD_PRESOLVE)
@@ -330,6 +337,12 @@ if(BUILD_TESTING)
     add_test(NAME pdhg_safeguards_cpu COMMAND mlxpdlp_pdhg_safeguards cpu)
     add_test(NAME pdhg_safeguards_metal COMMAND mlxpdlp_pdhg_safeguards metal)
     set_tests_properties(pdhg_safeguards_metal PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(mlxpdlp_metal_spmv_test tests/test_metal_spmv.cpp)
+    target_include_directories(mlxpdlp_metal_spmv_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(mlxpdlp_metal_spmv_test PRIVATE mlxPDLP::solver)
+    mlxpdlp_enable_warnings(mlxpdlp_metal_spmv_test)
+    add_test(NAME metal_spmv COMMAND mlxpdlp_metal_spmv_test)
+    set_tests_properties(metal_spmv PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME device_comparison COMMAND mlxpdlp_device_comparison)
     set_tests_properties(device_comparison PROPERTIES SKIP_RETURN_CODE 77)
 

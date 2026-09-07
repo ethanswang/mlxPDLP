@@ -1,8 +1,9 @@
 # Performance benchmarks
 
-Two benchmark modes are available:
+Three benchmark modes are available:
 
 - `mlxpdlp_mps_benchmark` compares CPU and Metal using identical fixed work.
+- `mlxpdlp_spmv_benchmark` measures the production Metal CSR kernels directly.
 - `mlxpdlp_lpfeas_benchmark` runs provenance-tracked LPfeas or Netlib manifests
   to convergence and writes independently audited CSV and JSON reports.
 
@@ -13,9 +14,33 @@ cmake -S . -B build \
   -DMLX_BUILD_DIR=/absolute/path/to/mlx/build \
   -DMLXPDLP_BUILD_BENCHMARKS=ON
 cmake --build build --target \
-  mlxpdlp_mps_benchmark mlxpdlp_lpfeas_benchmark \
+  mlxpdlp_mps_benchmark mlxpdlp_spmv_benchmark mlxpdlp_lpfeas_benchmark \
   --parallel
 ```
+
+## Metal SpMV benchmark
+
+```sh
+./build/mlxpdlp_spmv_benchmark benchmarks/data/lpfeas/ex10.mps.gz
+./build/mlxpdlp_spmv_benchmark benchmarks/data/lpfeas/s82.mps.gz 64 7 adaptive
+```
+
+The positional options select repetitions per batch, measured trials, and
+`all`, `scalar`, `quad`, `simd`, or `adaptive`. Both matrix orientations are
+checked against independent FP64 sums of the FP32 inputs before timing. Eligible
+orientations compare 32-bit and lossless 16-bit column indices. The CSV includes
+median/minimum/maximum microseconds, actual repetitions, and the largest error
+normalized by `1 + sum(abs(a_ij * x_j))`; comments record the matrix profile,
+GPU, revision, and source digest.
+
+Three warm batches precede measurement. Each timed batch retains every output
+and includes MLX enqueue, evaluation, and synchronization. Repetitions are
+bounded to keep output buffers near 64 MiB (at least one output). These are
+independent products on an unscaled matrix; use the fixed-work and convergence
+benchmarks to assess full solver performance.
+
+The [SpMV optimization measurements](spmv-performance.md) record the matched
+before/after solver comparison and its limits.
 
 ## LPfeas protocol benchmark
 
@@ -38,7 +63,7 @@ The default protocol uses Metal CSR in FP32, PSLP 0.0.11, L2 residuals,
 bound/objective scaling, evaluation frequency 200, up to 200 power-method
 iterations, a 1,000-second per-attempt limit, and a practical `1e-4`
 convergence tolerance. The iteration limit is otherwise unlimited. Each worker
-warms all three sparse Metal strategies in both orientations before the sweep
+warms all four sparse Metal strategies, both index widths, and both orientations before the sweep
 clock starts. Warmup is serialized because the linked MLX custom-kernel cache
 can race during concurrent first-use compilation; timed solves use parallel
 worker streams. Pass `--cold-start` with `--jobs 1` to include first-use compilation.
