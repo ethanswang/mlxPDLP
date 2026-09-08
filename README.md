@@ -31,7 +31,7 @@ or the original cuPDLPx source tree.
 - Metal execution when MLX is built with `MLX_BUILD_METAL=ON`
 - CSR Metal matrix-vector products with a stored sparse transpose
 - Accelerate sparse CPU matrix-vector products for large CSR models
-- Fused single-kernel Metal PDHG half-steps with batched lazy evaluation
+- Fused Metal PDHG half-steps with buffer reuse across iteration batches
 - Halpern PDHG with adaptive restart and primal-weight control
 - Infeasibility and unboundedness certificates with active termination
 - Geometric-mean, Ruiz, Pock-Chambolle, and bound/objective preconditioning
@@ -256,7 +256,19 @@ not part of the tested dependency combination.
 | `MLXPDLP_BUILD_BENCHMARKS` | `OFF` | Build fixed-work and LPfeas Metal benchmarks |
 | `MLXPDLP_ENABLE_NETLIB_REGRESSION` | `OFF` | Register the downloaded 40-case Netlib CPU/Metal regression suite |
 | `MLXPDLP_ENABLE_WARNINGS` | `ON` | Enable common compiler warnings |
+| `MLXPDLP_ENABLE_METAL_BATCHING` | `ON` | Enable native iteration batches when compatible MLX Metal headers and symbols are available |
 | `MLXPDLP_ALLOW_DOWNLOADS` | `OFF` | Allow direct CMake to obtain a missing PSLP source checkout |
+
+Native Metal batches reuse temporary state buffers for up to 16 minor
+iterations while preserving the existing kernel launches and checkpoint
+cadence. CMake checks the selected MLX backend and finds its metal-cpp headers
+in either a source/build tree or an installation; unsupported configurations
+retain the existing fused lazy evaluation path. No additional download is
+required. Set `pdhg_parameters_t::metal_iteration_batching` to `false` (or
+`Parameters.metal_iteration_batching = False` in Python) for a runtime
+comparison, or build with `-DMLXPDLP_ENABLE_METAL_BATCHING=OFF` to omit the
+native encoder entirely. `state().metal_iteration_batching_active` reports
+which path the main solve loop selected.
 
 For a minimal solver-only library:
 

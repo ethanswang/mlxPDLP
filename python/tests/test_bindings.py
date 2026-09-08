@@ -49,6 +49,9 @@ def test_version():
 def test_parameters_defaults_and_roundtrip():
     p = mlxpdlp.Parameters()
     assert p.presolve is True
+    assert p.metal_iteration_batching is True
+    p.metal_iteration_batching = False
+    assert p.metal_iteration_batching is False
     assert p.termination_criteria.eps_infeasible_relative == 1e-14
     assert mlxpdlp.TerminationCriteria().eps_infeasible_relative == 1e-14
     p.termination_criteria.eps_infeasible_relative = 1e-6

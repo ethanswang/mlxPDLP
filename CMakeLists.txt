@@ -32,6 +32,8 @@ option(MLXPDLP_BUILD_BENCHMARKS "Build performance benchmark executables" OFF)
 option(MLXPDLP_ENABLE_NETLIB_REGRESSION
     "Register the downloaded 40-case Netlib CPU/Metal regression suite" OFF)
 option(MLXPDLP_ENABLE_WARNINGS "Enable compiler warnings for mlxPDLP targets" ON)
+option(MLXPDLP_ENABLE_METAL_BATCHING
+    "Reuse buffers in Metal iteration batches when the MLX backend supports it" ON)
 option(MLXPDLP_ALLOW_DOWNLOADS
     "Allow CMake to download missing third-party source dependencies" OFF)
 
@@ -151,6 +153,35 @@ target_include_directories(mlxpdlp_solver PUBLIC
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 target_link_libraries(mlxpdlp_solver PUBLIC MLX::MLX)
+
+# The native batch encoder is private to the solver. Keep source/build-tree
+# and installed MLX layouts usable, including CPU-only builds and revisions
+# whose internal Metal interfaces differ. Compile and link the actual adapter
+# before opting in; otherwise retain the ordinary fused lazy graph.
+set(MLXPDLP_HAS_METAL_BATCHING FALSE)
+if(APPLE AND MLXPDLP_ENABLE_METAL_BATCHING AND MLX_METAL_CPP_INCLUDE_DIR)
+    include(CheckCXXSourceCompiles)
+    include(CMakePushCheckState)
+    cmake_push_check_state(RESET)
+    set(CMAKE_REQUIRED_INCLUDES "${MLX_METAL_CPP_INCLUDE_DIR}")
+    set(CMAKE_REQUIRED_LIBRARIES MLX::MLX)
+    # Recheck when reconfiguring against another MLX build or adapter version.
+    unset(MLXPDLP_METAL_BATCHING_COMPATIBLE CACHE)
+    check_cxx_source_compiles(
+        "#include \"${CMAKE_CURRENT_SOURCE_DIR}/src/metal_minor_batch.cpp\"
+         int main() { return 0; }"
+        MLXPDLP_METAL_BATCHING_COMPATIBLE)
+    cmake_pop_check_state()
+    if(MLXPDLP_METAL_BATCHING_COMPATIBLE)
+        set(MLXPDLP_HAS_METAL_BATCHING TRUE)
+        target_sources(mlxpdlp_solver PRIVATE src/metal_minor_batch.cpp)
+        target_include_directories(mlxpdlp_solver SYSTEM PRIVATE
+            "${MLX_METAL_CPP_INCLUDE_DIR}")
+        target_compile_definitions(mlxpdlp_solver PRIVATE MLXPDLP_HAS_METAL_BATCHING=1)
+    endif()
+endif()
+message(STATUS "mlxPDLP native Metal iteration batching: ${MLXPDLP_HAS_METAL_BATCHING}")
+
 if(APPLE)
     find_library(MLXPDLP_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
     target_compile_definitions(mlxpdlp_solver PRIVATE MLXPDLP_HAS_ACCELERATE_SPARSE=1)
@@ -343,6 +374,15 @@ if(BUILD_TESTING)
     mlxpdlp_enable_warnings(mlxpdlp_metal_spmv_test)
     add_test(NAME metal_spmv COMMAND mlxpdlp_metal_spmv_test)
     set_tests_properties(metal_spmv PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(mlxpdlp_metal_batch_test tests/test_metal_batch.cpp)
+    target_link_libraries(mlxpdlp_metal_batch_test PRIVATE mlxPDLP::solver)
+    if(MLXPDLP_HAS_METAL_BATCHING)
+        target_compile_definitions(mlxpdlp_metal_batch_test PRIVATE
+            MLXPDLP_EXPECT_METAL_BATCHING=1)
+    endif()
+    mlxpdlp_enable_warnings(mlxpdlp_metal_batch_test)
+    add_test(NAME metal_iteration_batch COMMAND mlxpdlp_metal_batch_test)
+    set_tests_properties(metal_iteration_batch PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME device_comparison COMMAND mlxpdlp_device_comparison)
     set_tests_properties(device_comparison PROPERTIES SKIP_RETURN_CODE 77)
 

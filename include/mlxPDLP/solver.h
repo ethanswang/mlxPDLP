@@ -125,6 +125,10 @@ typedef struct {
     // Disable to fall back to the unfused MLX-expression formulation for A/B
     // comparison or diagnostics. Only affects the sparse Metal backend.
     bool metal_fused_kernels;
+    // Reuse owned state buffers across fused minor iterations (default on).
+    // Requires compatible MLX Metal backend headers at build time. Disable
+    // to keep the ordinary fused lazy graph for comparison or diagnostics.
+    bool metal_iteration_batching;
     // Add Metal-adapted cuOpt Stable3-style early evaluation checkpoints,
     // starting every 100 iterations below 10,000 and backing off by a decade
     // at each subsequent threshold. They are limited to working models with at
@@ -244,6 +248,8 @@ struct MlxPdlpState {
     int nnz;
     bool sparse_metal_active;
     bool sparse_cpu_active;
+    // True when the main loop selects native Metal iteration batches.
+    bool metal_iteration_batching_active = false;
     // A and A^T are profiled independently because their CSR row-length
     // distributions can require different Metal thread mappings.
     SparseMetalSpmvStrategy sparse_a_spmv_strategy;
@@ -563,6 +569,7 @@ class MlxPdlpSolver {
 
     // ---- PDHG iteration sub-steps ----
     void mlx_compute_next_primal(int k_offset, bool is_major);
+    void mlx_compute_minor_batch(int first_offset, int count, bool eval_now);
     // eval_now controls the fused sparse-Metal path: when false, the half-step
     // kernels are only appended to the lazy graph and are materialized by a
     // later eval, batching consecutive iterations into one evaluation.

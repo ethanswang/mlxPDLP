@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "mlxPDLP/solver.h"
 #include "cpu_sparse_matrix.h"
+#include "metal_minor_batch.h"
 #include "metal_spmv.h"
 #include "pdhg_control.h"
 
@@ -271,6 +272,7 @@ void mlxpdlp_set_default_parameters(pdhg_parameters_t *p) {
     p->presolve_primal_propagation = false;
     p->matrix_zero_tol = 1e-9;
     p->metal_fused_kernels = true;
+    p->metal_iteration_batching = true;
     p->conditional_termination_evaluation = true;
 }
 
@@ -1425,14 +1427,13 @@ int MlxPdlpSolver::fused_eval_batch_size() const {
     // Bound the lazy batch graph to a fixed intermediate footprint so large
     // problems do not accumulate hundreds of iteration outputs in memory.
     constexpr double target_bytes = 256.0 * 1024.0 * 1024.0;
-    constexpr int max_batch = 16;
     const double per_iteration_bytes =
         static_cast<double>(2LL * s_.n + s_.m) * sizeof(float);
     if (per_iteration_bytes <= 0.0) {
         return 1;
     }
     int batch = static_cast<int>(target_bytes / per_iteration_bytes);
-    return std::clamp(batch, 1, max_batch);
+    return std::clamp(batch, 1, detail::max_metal_batch_iterations);
 }
 
 mx::array MlxPdlpSolver::sparse_cpu_matvec(const mx::array &x, bool transpose,
@@ -2211,6 +2212,32 @@ double MlxPdlpSolver::mlx_estimate_max_singular_value() {
 // ---------------------------------------------------------------------------
 // PDHG iteration sub-steps
 // ---------------------------------------------------------------------------
+
+#ifdef MLXPDLP_HAS_METAL_BATCHING
+void MlxPdlpSolver::mlx_compute_minor_batch(int first_offset, int count,
+                                           bool eval_now) {
+    const double dummy_scalars[3] = {0.0, 0.0, 0.0};
+    auto scalars = mlx_array_from_doubles(dummy_scalars, 3, mx::float32);
+    auto primal = fused_primal_step(scalars, false);
+    auto dual = fused_dual_step(scalars, false);
+    std::vector<detail::BatchScalars> weights;
+    weights.reserve(count);
+    for (int i = 0; i < count; ++i) {
+        const int k = s_.inner_count + first_offset + i;
+        const float weight = static_cast<float>(
+            static_cast<double>(k) / static_cast<double>(k + 1));
+        const float reflection = static_cast<float>(params_.reflection_coefficient);
+        weights.push_back({{
+            {static_cast<float>(s_.step_size_primal), reflection, weight},
+            {static_cast<float>(s_.step_size_dual), reflection, weight}}});
+    }
+    auto output = detail::metal_minor_batch(primal, dual, std::move(weights), s_.stream);
+    s_.x_cur = output[0];
+    s_.x_ref = output[1];
+    s_.y_cur = output[2];
+    if (eval_now) mx::eval(s_.x_cur, s_.x_ref, s_.y_cur);
+}
+#endif
 
 void MlxPdlpSolver::mlx_compute_next_primal(int k_offset, bool is_major) {
     int k = s_.inner_count + k_offset;
@@ -4416,6 +4443,11 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
     // graph and are materialized every fused_batch iterations; major
     // iterations always evaluate so restart/residual checks see live data.
     const int fused_batch = fused_eval_batch_size();
+    bool use_minor_batch = false;
+#ifdef MLXPDLP_HAS_METAL_BATCHING
+    use_minor_batch = params_.metal_iteration_batching && fused_batch > 1;
+#endif
+    s_.metal_iteration_batching_active = use_minor_batch;
 
     while (s_.total_count < params_.termination_criteria.iteration_limit) {
         const int remaining =
@@ -4435,9 +4467,11 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
         // fixed-point baseline. Otherwise the first iteration can use the
         // cheaper minor kernel; only the checkpoint itself needs snapshots.
         const bool first_is_major = do_restart || block_iterations == 1;
-        mlx_compute_next_primal(1, first_is_major);
-        mlx_compute_next_dual(1, first_is_major,
-                              first_is_major || fused_batch == 1);
+        if (!use_minor_batch || first_is_major) {
+            mlx_compute_next_primal(1, first_is_major);
+            mlx_compute_next_dual(1, first_is_major,
+                                  first_is_major || fused_batch == 1);
+        }
 
         // After first iteration, check if we need a restart
         if (do_restart) {
@@ -4447,9 +4481,24 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
         }
 
         // --- Minor iterations 2 through the penultimate iteration ---
-        for (int i = 2; i < block_iterations; ++i) {
-            mlx_compute_next_primal(i, false);
-            mlx_compute_next_dual(i, false, i % fused_batch == 0);
+#ifdef MLXPDLP_HAS_METAL_BATCHING
+        if (use_minor_batch) {
+            for (int i = first_is_major ? 2 : 1; i < block_iterations;) {
+                // Use the existing evaluation boundaries, including a short
+                // lazy tail that the following major iteration evaluates.
+                const int count = std::min(block_iterations - i,
+                                           fused_batch - (i - 1) % fused_batch);
+                mlx_compute_minor_batch(i, count,
+                                        (i + count - 1) % fused_batch == 0);
+                i += count;
+            }
+        } else
+#endif
+        {
+            for (int i = 2; i < block_iterations; ++i) {
+                mlx_compute_next_primal(i, false);
+                mlx_compute_next_dual(i, false, i % fused_batch == 0);
+            }
         }
 
         // --- Last iteration (major) ---

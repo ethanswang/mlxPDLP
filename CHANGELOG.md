@@ -54,6 +54,11 @@ and the project intends to follow
 
 ### Changed
 
+- Metal minor iterations now reuse two solver-owned scratch-buffer pairs across
+  batches of up to 16 iterations instead of retaining every intermediate MLX
+  array. Native batching is enabled by default, can be disabled per solve, and
+  falls back to the existing lazy graph when the selected MLX revision is not
+  source-compatible with the private adapter.
 - Correct HPR's inverse conversion from primal step to primal weight and restore
   its necessary-reduction restart condition. Guard PID updates in log space,
   clamp finite positive weights, and validate controller/reflection parameters.

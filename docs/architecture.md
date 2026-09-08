@@ -48,7 +48,7 @@ line number so it remains useful as the source evolves.
 | Primal and dual warm starts | Implemented when presolve is disabled |
 | Active infeasibility-certificate termination | Implemented (Farkas separation ray tests) |
 | Fused single-kernel Metal PDHG half-steps | Implemented and enabled by default |
-| Batched lazy evaluation of fused iterations | Implemented with a memory-bounded batch |
+| Native batching of fused minor iterations | Implemented with two reusable scratch-buffer pairs and a compatibility fallback |
 | Batched block-level scalar reductions | Implemented with one host synchronization per metric group |
 | Sparse Metal infeasibility-check cadence | First block, about every 1,000 iterations, and limit blocks |
 | Step-size safeguards | Optional norm-bound initialization and bounded recovery from finite checkpoints |
@@ -63,6 +63,7 @@ loader uses globally visible `mlxpdlp_`-prefixed names.
 |---|---|
 | `include/mlxPDLP/solver.h` | Public solver types, state, and `MlxPdlpSolver` API |
 | `src/solver.cpp` | MLX-backed PDHG implementation |
+| `src/metal_minor_batch.*` | Private Metal encoder adapter for buffer-reusing minor-iteration batches |
 | `src/metal_spmv.h` | Shared Metal CSR work descriptors, reductions, and standalone dispatch |
 | `src/pdhg_control.h` | Shared guarded PID/HPR updates and numerical-metric checks |
 | `src/cpu_sparse_matrix.h` | Accelerate sparse matrix ownership shared by CPU PDHG and FP64 continuation |
@@ -82,6 +83,7 @@ loader uses globally visible `mlxpdlp_`-prefixed names.
 | `tests/test_pdhg_safeguards.cpp` | Adversarial spectral, controller, precision-feedback, and native-continuation regressions |
 | `tests/test_device_comparison.cpp` | Analytic and sparse duplicate-coordinate CPU/GPU comparison |
 | `tests/test_metal_spmv.cpp` | Direct Metal CSR products against independent FP64 sums |
+| `tests/test_metal_batch.cpp` | Exact trajectory, iteration-boundary, layout, and fallback checks for native batching |
 | `tests/test_mps_device_comparison.cpp` | Netlib ADLITTLE CPU/GPU comparison |
 | `tests/data/netlib` | Vendored ADLITTLE MPS benchmark and provenance |
 | `benchmarks/mps_device_benchmark.cpp` | Fixed-work MPS CPU/Metal benchmark |
@@ -172,6 +174,7 @@ Available build options:
 | `MLXPDLP_BUILD_MPS` | `ON` | Builds the bundled MPS loader and requires Zlib |
 | `MLXPDLP_BUILD_EXAMPLES` | `ON` | Builds Metal correctness, convergence, and acceleration examples |
 | `MLXPDLP_BUILD_BENCHMARKS` | `OFF` | Builds fixed-work and LPfeas Metal benchmarks |
+| `MLXPDLP_ENABLE_METAL_BATCHING` | `ON` | Enables native buffer-reusing iteration batches when the selected MLX source interface is compatible |
 | `MLXPDLP_ENABLE_WARNINGS` | `ON` | Enables common compiler warnings |
 | `MLXPDLP_ALLOW_DOWNLOADS` | `OFF` | Allows direct CMake to fetch missing PSLP source |
 
@@ -432,10 +435,14 @@ a major and minor variant. Major primal/dual kernels expose four/three
 outputs; minor kernels expose only `x_cur`/`x_ref` or `y_cur`/`y_ref`, avoiding
 three discarded snapshot-buffer allocations per minor iteration. The shared
 update bodies replicate the MLX expression sequences so the fused path is
-numerically comparable to the unfused one. Minor iterations accumulate in the
-lazy graph and are evaluated every `fused_eval_batch_size()` iterations (a
-memory-bounded batch, at most 16), so one `mx::eval` materializes many
-iterations instead of four per iteration. `metal_fused_kernels = false`
+numerically comparable to the unfused one. On compatible MLX revisions,
+`metal_iteration_batching = true` encodes up to 16 minor iterations at once and
+alternates their live state through two solver-owned scratch-buffer pairs. The
+batch retains the same kernels, launch geometry, scalar sequence, checkpoint
+boundaries, and externally visible solver state while avoiding a distinct set
+of intermediate arrays for every iteration. CMake checks the selected MLX
+source interface before compiling this private adapter; incompatible revisions
+retain the existing memory-bounded lazy graph. `metal_fused_kernels = false`
 restores the unfused MLX-expression formulation for A/B comparison. This
 design matches the fused bucket kernels of HPR-LP-C.
 
@@ -508,6 +515,7 @@ post-Ruiz refresh is required).
 | `conditional_termination_evaluation` | `true` |
 | `reflection_coefficient` | `1.0` |
 | `metal_fused_kernels` | `true` |
+| `metal_iteration_batching` | `true` (Metal fused path when build-compatible) |
 | `sv_max_iter` | `200` |
 | `sv_tol` | `1e-4` |
 | `conservative_step_size` | `false` |
@@ -1064,6 +1072,7 @@ CTest registers:
 | `solver` | Solver, warm-start, presolve, postsolve, termination, and FP64 Farkas infeasibility-certificate regressions |
 | `pdhg_safeguards_cpu`, `pdhg_safeguards_metal` | Underestimated spectral norm, bounded recovery, conservative steps, PID/HPR guards, FP64 feedback, and native continuation |
 | `metal_spmv` | Independent FP64 reference checks for all four row mappings, both orientations, empty/duplicate/cancelling rows, incomplete work packs, and 16-/32-bit index boundaries |
+| `metal_iteration_batch` | Byte-identical batched/unbatched solver state across batch, checkpoint, sparse-layout, and index-width boundaries; compiled-adapter fallback behavior |
 | `device_comparison` | Analytic and sparse LPs on CPU and GPU, fused/unfused iteration agreement across all four SpMV strategies, SIMD-group threshold override, infeasibility tolerance independence and false-status regressions on CPU/Metal, FP32 Metal infeasibility certificates, and sparse-Metal certificate cadence |
 | `mps_device_comparison` | Bundled Netlib ADLITTLE MPS on CPU and GPU |
 | `netlib_regression_cpu` | Opt-in downloaded 40-case Netlib audit on CPU FP64 |
