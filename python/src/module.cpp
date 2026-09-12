@@ -22,10 +22,12 @@ limitations under the License.
 
 #include "mlxPDLP/mps_loader.h"
 #include "mlxPDLP/solver.h"
+#include "mlxPDLP/batch_solver.h"
 #include "mlxPDLP/version.h"
 
 #include <mlx/mlx.h>
 
+#include <nanobind/stl/vector.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -227,9 +229,17 @@ static void bind_parameters(nb::module_ &m) {
 // ---------------------------------------------------------------------------
 
 struct SolveResult {
+    nb::object primal_ray;
+    nb::object dual_ray;
     nb::object primal_solution;
     nb::object dual_solution;
     nb::object reduced_cost;
+    size_t input_index = 0;
+    bool has_solution = true;
+    int step_size_reductions = 0;
+    int original_audit_failures = 0;
+    double queue_time_sec = 0.0;
+    double execution_time_sec = 0.0;
     int num_variables = 0;
     int num_constraints = 0;
     int num_nonzeros = 0;
@@ -262,9 +272,11 @@ struct SolveResult {
 
     static SolveResult from_result(const mlxpdlp_result_t *r) {
         SolveResult out;
-        out.primal_solution = to_numpy_f64(r->primal_solution, r->num_variables);
-        out.dual_solution = to_numpy_f64(r->dual_solution, r->num_constraints);
-        out.reduced_cost = to_numpy_f64(r->reduced_cost, r->num_variables);
+        out.primal_ray = to_numpy_f64(nullptr, 0);
+        out.dual_ray = to_numpy_f64(nullptr, 0);
+        out.primal_solution = to_numpy_f64(r->primal_solution, r->primal_solution ? r->num_variables : 0);
+        out.dual_solution = to_numpy_f64(r->dual_solution, r->dual_solution ? r->num_constraints : 0);
+        out.reduced_cost = to_numpy_f64(r->reduced_cost, r->reduced_cost ? r->num_variables : 0);
         out.num_variables = r->num_variables;
         out.num_constraints = r->num_constraints;
         out.num_nonzeros = r->num_nonzeros;
@@ -332,6 +344,14 @@ static void bind_result(nb::module_ &m) {
                 "Dual variables (numpy.ndarray of shape (num_constraints,)).")
         .def_ro("reduced_cost", &SolveResult::reduced_cost,
                 "Reduced costs (numpy.ndarray of shape (num_variables,)).")
+        .def_ro("input_index", &SolveResult::input_index)
+        .def_ro("primal_ray", &SolveResult::primal_ray)
+        .def_ro("dual_ray", &SolveResult::dual_ray)
+        .def_ro("has_solution", &SolveResult::has_solution)
+        .def_ro("step_size_reductions", &SolveResult::step_size_reductions)
+        .def_ro("original_audit_failures", &SolveResult::original_audit_failures)
+        .def_ro("queue_time_sec", &SolveResult::queue_time_sec)
+        .def_ro("execution_time_sec", &SolveResult::execution_time_sec)
         .def_ro("num_variables", &SolveResult::num_variables)
         .def_ro("num_constraints", &SolveResult::num_constraints)
         .def_ro("num_nonzeros", &SolveResult::num_nonzeros)
@@ -579,6 +599,8 @@ static void bind_solver(nb::module_ &m) {
              "backend.");
 }
 
+#include "batch_bindings.h"
+
 // ---------------------------------------------------------------------------
 // MPS loading
 // ---------------------------------------------------------------------------
@@ -675,5 +697,6 @@ NB_MODULE(_core, m) {
     bind_parameters(m);
     bind_result(m);
     bind_solver(m);
+    bind_batch(m);
     bind_mps(m);
 }

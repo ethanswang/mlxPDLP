@@ -44,6 +44,8 @@ Typical usage::
 
 from . import _core
 from ._core import (
+    BatchResult,
+    SharedMatrixPlan,
     MpsProblem,
     NormType,
     Parameters,
@@ -60,6 +62,8 @@ from ._core import (
 __version__ = _core.__version__
 
 __all__ = [
+    "BatchResult",
+    "SharedMatrixPlan",
     "MpsProblem",
     "NormType",
     "Parameters",

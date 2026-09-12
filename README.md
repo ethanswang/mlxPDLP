@@ -32,6 +32,8 @@ or the original cuPDLPx source tree.
 - CSR Metal matrix-vector products with a stored sparse transpose
 - Accelerate sparse CPU matrix-vector products for large CSR models
 - Fused Metal PDHG half-steps with buffer reuse across iteration batches
+- Explicit [shared-matrix LP batches](docs/batch_solver.md) with CSR SpMM,
+  independent controllers, owned C++/Python results and original-model audits
 - Halpern PDHG with adaptive restart and primal-weight control
 - Infeasibility and unboundedness certificates with active termination
 - Geometric-mean, Ruiz, Pock-Chambolle, and bound/objective preconditioning

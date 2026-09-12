@@ -101,6 +101,14 @@ class TerminationReason(enum.IntEnum):
 
 
 class SolveResult:
+    primal_ray: np.ndarray
+    dual_ray: np.ndarray
+    input_index: int
+    has_solution: bool
+    step_size_reductions: int
+    original_audit_failures: int
+    queue_time_sec: float
+    execution_time_sec: float
     primal_solution: np.ndarray
     dual_solution: np.ndarray
     reduced_cost: np.ndarray
@@ -187,3 +195,51 @@ def version() -> str: ...
 
 
 def load_mps(path: str) -> MpsProblem: ...
+
+
+class BatchResult:
+    results: list[SolveResult]
+    execution: str
+    fallback_reason: str
+    wall_time_sec: float
+    packing_time_sec: float
+    construction_time_sec: float
+    initialization_time_sec: float
+    pdhg_time_sec: float
+    checkpoint_time_sec: float
+    audit_time_sec: float
+    deadline_overrun_sec: float
+    estimated_peak_resident_bytes: int
+    groups: int
+    max_active_width: int
+    lp_tile_width: int
+    iteration_batch_size: int
+    native_iteration_batching_active: bool
+
+
+class SharedMatrixPlan:
+    num_variables: int
+    num_constraints: int
+    num_nonzeros: int
+    resident_bytes: int
+    preparation_time_sec: float
+    operator_norm_upper_bound: float
+
+    def __init__(self, num_variables: int, num_constraints: int,
+                 row_ptr: np.ndarray, col_indices: np.ndarray, values: np.ndarray,
+                 parameters: Parameters | None = None, device: str = "cpu") -> None: ...
+
+    def solve_batch(self, objective: np.ndarray, objective_constant: float | np.ndarray = 0.0,
+                    variable_lower_bounds: np.ndarray | None = None,
+                    variable_upper_bounds: np.ndarray | None = None,
+                    constraint_lower_bounds: np.ndarray | None = None,
+                    constraint_upper_bounds: np.ndarray | None = None,
+                    primal_start: np.ndarray | None = None,
+                    dual_start: np.ndarray | None = None,
+                    reduced_cost_start: np.ndarray | None = None,
+                    primal_start_mask: list[bool] | None = None,
+                    dual_start_mask: list[bool] | None = None,
+                    reduced_cost_start_mask: list[bool] | None = None,
+                    parameters: Parameters | None = None, execution: str = "auto",
+                    time_sec_limit: float = float("inf"), resident_memory_budget_bytes: int = 0,
+                    lp_tile_width: int = 4, iteration_batch_size: int = 16) -> BatchResult: ...

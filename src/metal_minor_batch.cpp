@@ -261,4 +261,116 @@ std::vector<batch_mx::array> metal_minor_batch(const std::vector<batch_mx::array
                                         std::move(primitive), inputs);
 }
 
+
+namespace {
+BatchKernel capture_spmm_batch_kernel(const batch_mx::array &output,
+                                      std::vector<batch_mx::array> &inputs, bool primal) {
+    const auto *primitive = dynamic_cast<batch_mx::fast::CustomKernel *>(output.primitive_ptr().get());
+    if (!primitive) throw std::logic_error("SpMM batch requires a custom kernel");
+    auto state = primitive->state();
+    const auto &source = output.inputs();
+    const auto &name = std::get<0>(state);
+    const std::string suffix = primal ? "_1_minor" : "_2_minor";
+    if (name.find("custom_kernel_mlxpdlp_spmm_") != 0 ||
+        name.find(suffix + "_") == std::string::npos ||
+        source.size() != 12 || std::get<4>(state).size() != source.size() ||
+        std::get<6>(state).has_value() || !std::get<7>(state).empty() || std::get<8>(state) || std::get<9>(state) != 0)
+        throw std::logic_error("unsupported SpMM batch metadata: " + name +
+                               " (inputs=" + std::to_string(source.size()) + ")");
+    if (source[11].dtype() != batch_mx::float32 || source[11].ndim() != 2 || source[11].shape(0) != 4 ||
+        source[11].shape(1) != output.shape(1) || std::get<4>(state)[11] != std::tuple{false,false,false})
+        throw std::logic_error("unsupported SpMM coefficient metadata");
+    std::vector<int> map(12,-1);
+    for (int i=0;i<11;++i) if (i!=3 && i!=5) map[i]=batch_add_input(source[i],inputs);
+    return {std::move(state),std::move(map),3,5};
+}
+
+class MetalSpmmMinorBatch final : public batch_mx::Primitive {
+  public:
+    MetalSpmmMinorBatch(batch_mx::Stream stream, BatchKernel primal, BatchKernel dual,
+                       int x, int y, std::vector<std::vector<float>> coefficients)
+        : Primitive(stream), primal_(std::move(primal)),dual_(std::move(dual)),x_(x),y_(y),coefficients_(std::move(coefficients)) {}
+    const char *name() const override { return "MlxPdlpMetalSpmmMinorBatch"; }
+    void eval_cpu(const std::vector<batch_mx::array> &, std::vector<batch_mx::array> &) override {
+        throw std::runtime_error("SpMM iteration batches require Metal");
+    }
+    void eval_gpu(const std::vector<batch_mx::array> &inputs, std::vector<batch_mx::array> &outputs) override {
+        for (const auto &input : inputs) if (!input.flags().row_contiguous)
+            throw std::runtime_error("SpMM batch requires contiguous inputs");
+        for (auto &output : outputs) output.set_data(batch_mx::allocator::malloc(output.nbytes()));
+        std::vector<batch_mx::array> scratch;
+        if (coefficients_.size()>1) for (int index : {0,2}) {
+            scratch.emplace_back(outputs[index].shape(),outputs[index].dtype(),nullptr,std::vector<batch_mx::array>{});
+            scratch.back().set_data(batch_mx::allocator::malloc(scratch.back().nbytes()));
+        }
+        auto &device=batch_mx::metal::device(stream().device);
+        auto load=[&](const BatchKernel &plan) {
+            auto *kernel=device.get_kernel(std::get<0>(plan.state),batch_library(device,plan.state));
+            const auto [gx,gy,gz]=std::get<2>(plan.state);
+            const auto [tx,ty,tz]=std::get<3>(plan.state);
+            if (gx<=0||gy<=0||gz<=0||tx<=0||ty<=0||tz<=0||size_t(tx)*ty*tz>kernel->maxTotalThreadsPerThreadgroup())
+                throw std::runtime_error("invalid SpMM batch launch dimensions");
+            return kernel;
+        };
+        auto *primal_kernel=load(primal_), *dual_kernel=load(dual_);
+        auto &encoder=batch_mx::metal::get_command_encoder(stream());
+        auto retained=outputs;retained.insert(retained.end(),scratch.begin(),scratch.end());
+        encoder.add_temporaries(std::move(retained));
+        auto encode=[&](const BatchKernel &plan,MTL::ComputePipelineState *kernel,
+                        const batch_mx::array &vector,const batch_mx::array &current,
+                        const std::vector<float> &coeff,batch_mx::array &next,batch_mx::array &reflected) {
+            encoder.set_compute_pipeline_state(kernel);
+            int binding=0;
+            const auto &info=std::get<4>(plan.state);
+            for (int i=0;i<12;++i) {
+                if (i==11) {encoder.set_bytes(coeff.data(),coeff.size(),binding++);continue;}
+                const auto &input=i==3?vector:i==5?current:inputs[plan.input_map[i]];
+                encoder.set_input_array(input,binding++);
+                const int ndim=input.ndim();
+                if (ndim>0) {
+                    if (std::get<0>(info[i])) encoder.set_vector_bytes(input.shape(),ndim,binding++);
+                    if (std::get<1>(info[i])) encoder.set_vector_bytes(input.strides(),ndim,binding++);
+                    if (std::get<2>(info[i])) encoder.set_bytes(ndim,binding++);
+                }
+            }
+            encoder.set_output_array(next,binding++);encoder.set_output_array(reflected,binding++);
+            const auto [gx,gy,gz]=std::get<2>(plan.state);const auto [tx,ty,tz]=std::get<3>(plan.state);
+            encoder.dispatch_threads(MTL::Size(gx,gy,gz),MTL::Size(std::min(gx,tx),std::min(gy,ty),std::min(gz,tz)));
+        };
+        auto x=inputs[x_],y=inputs[y_];
+        for (size_t i=0;i<coefficients_.size();++i) {
+            const bool alternate=(coefficients_.size()-1-i)%2!=0;
+            auto &next_x=alternate?scratch[0]:outputs[0];auto &next_y=alternate?scratch[1]:outputs[2];
+            encode(primal_,primal_kernel,y,x,coefficients_[i],next_x,outputs[1]);
+            encode(dual_,dual_kernel,outputs[1],y,coefficients_[i],next_y,outputs[3]);
+            x=next_x;y=next_y;
+        }
+    }
+  private:
+    BatchKernel primal_,dual_;int x_,y_;std::vector<std::vector<float>> coefficients_;
+};
+} // namespace
+
+std::vector<batch_mx::array> metal_spmm_minor_batch(const std::vector<batch_mx::array> &primal,
+    const std::vector<batch_mx::array> &dual,std::vector<std::vector<float>> coefficients,batch_mx::Stream stream) {
+    if (primal.size()!=2||dual.size()!=2||coefficients.empty()||coefficients.size()>max_metal_batch_iterations)
+        throw std::logic_error("invalid SpMM iteration batch");
+    for (const auto *group : {&primal,&dual}) for (const auto &a : *group)
+        if (a.dtype()!=batch_mx::float32||a.ndim()!=2||a.size()==0||a.shape(1)>256||
+            !a.has_primitive()||a.primitive().stream()!=stream)
+            throw std::logic_error("invalid SpMM batch prototype");
+    for (const auto &c : coefficients) if (c.size()!=size_t(4*primal[0].shape(1)))
+        throw std::logic_error("invalid SpMM batch coefficients");
+    std::vector<batch_mx::array> inputs;
+    auto p=capture_spmm_batch_kernel(primal[0],inputs,true),d=capture_spmm_batch_kernel(dual[0],inputs,false);
+    const auto &x=primal[0].inputs()[5];const auto &y=primal[0].inputs()[3];
+    if (y.id()!=dual[0].inputs()[5].id()||x.shape()!=primal[0].shape()||x.shape()!=primal[1].shape()||
+        y.shape()!=dual[0].shape()||y.shape()!=dual[1].shape()||primal[1].id()!=dual[0].inputs()[3].id())
+        throw std::logic_error("SpMM prototype states differ");
+    const int xi=batch_add_input(x,inputs),yi=batch_add_input(y,inputs);
+    auto primitive=std::make_shared<MetalSpmmMinorBatch>(stream,std::move(p),std::move(d),xi,yi,std::move(coefficients));
+    return batch_mx::array::make_arrays({x.shape(),x.shape(),y.shape(),y.shape()},
+        {x.dtype(),x.dtype(),y.dtype(),y.dtype()},std::move(primitive),inputs);
+}
+
 } // namespace mlxpdlp::detail

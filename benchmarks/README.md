@@ -1,5 +1,11 @@
 # Performance benchmarks
 
+The shared-matrix LP benchmark sources include workload qualification,
+independent trace replay and a four-arm C++ SpMM comparison.
+It records original-model audits, per-member latency and iterations, process/MLX
+memory, full settings and provenance. See the [batch API](../docs/batch_solver.md)
+for explicit shared execution and fallback behavior.
+
 Three benchmark modes are available:
 
 - `mlxpdlp_mps_benchmark` compares CPU and Metal using identical fixed work.

@@ -111,6 +111,20 @@ void test_dual_infeasibility_is_detected() {
     CHECK(!metrics.satisfies(1e-6), "dual-infeasible point must fail validation");
 }
 
+void test_corrupt_one_batch_member() {
+    Fixture members[4];
+    for (auto &member : members)
+        CHECK(validate_original_problem(member.problem, member.result, member.objective, 0).satisfies(1e-12),
+              "every original member certificate passes");
+    // Stored solver metrics/status are not evidence: inspect each supplied
+    // x/y/z certificate again after deliberately corrupting just one member.
+    members[2].reduced_cost[0] = 1.0;
+    for (int j=0;j<4;++j)
+        CHECK(validate_original_problem(members[j].problem, members[j].result,
+                                        members[j].objective, 0).satisfies(1e-12) == (j!=2),
+              "validator must detect exactly the corrupted member");
+}
+
 } // namespace
 
 int main() {
@@ -118,6 +132,7 @@ int main() {
     test_primal_infeasibility_is_detected();
     test_cuda_gap_normalization();
     test_dual_infeasibility_is_detected();
+    test_corrupt_one_batch_member();
     if (failures == 0)
         std::printf("All LPfeas validation tests passed.\n");
     return failures == 0 ? 0 : 1;

@@ -10,6 +10,12 @@ and the project intends to follow
 
 ### Added
 
+- Explicit shared-matrix LP batches with immutable matrix preparation, C++ and
+  Python APIs, fused Metal SpMM, independent numerical control and original-FP64
+  certificate audits. Bounded resident groups, request deadlines, owned results,
+  presolve fallback and optional native iteration-buffer reuse are documented in
+  [the batch API guide](docs/batch_solver.md); measured M3 Max regimes and raw
+  reports accompany the feature.
 - Optional `conservative_step_size` and bounded numerical recovery from complete
   finite checkpoints when a power estimate permits an invalid fixed-point
   metric. Exhausted recovery reports `NUMERICAL_ERROR` (enum 9).

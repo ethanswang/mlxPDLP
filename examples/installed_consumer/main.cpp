@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include <mlxPDLP/solver.h>
+#include <mlxPDLP/batch_solver.h>
 
 #ifdef MLXPDLP_CONSUMER_HAS_MPS
 #include <mlxPDLP/mps_loader.h>
@@ -65,5 +66,22 @@ int main() {
     mlxpdlp_mps_problem_free(nullptr);
 #endif
 
-    return valid ? 0 : 1;
+    mlxpdlp::SharedMatrixPlan plan(1, 1, row_ptr, col_ind, values, &parameters, device);
+    std::vector<mlxpdlp::BatchProblem> problems(4);
+    for (auto &problem : problems) {
+        problem.objective = {1.0};
+        problem.variable_lower_bounds = {0.0};
+        problem.constraint_lower_bounds = problem.constraint_upper_bounds = {1.0};
+    }
+    mlxpdlp::BatchOptions options;
+    options.execution = device.type == mlxpdlp::mx::Device::gpu ?
+        mlxpdlp::BatchExecution::shared : mlxpdlp::BatchExecution::independent;
+    auto batch = plan.solve_batch(problems, options);
+    bool batch_valid = batch.results.size() == 4;
+    for (const auto &member : batch.results)
+        batch_valid = batch_valid && member.has_solution &&
+            member.result->termination_reason == mlxpdlp::TERMINATION_REASON_OPTIMAL &&
+            std::fabs(member.result->primal_solution[0] - 1.0) <= 5e-3;
+    std::printf("Installed shared-matrix batch consumer: %s\n", batch_valid ? "PASS" : "FAIL");
+    return valid && batch_valid ? 0 : 1;
 }

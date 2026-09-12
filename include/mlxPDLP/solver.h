@@ -39,6 +39,8 @@ namespace mx = mlx::core;
 
 namespace detail {
 struct CpuSparseMatrix;
+struct SolverMatrixStorage;
+struct BatchDriver;
 struct PresolveContext;
 }
 
@@ -427,6 +429,18 @@ class MlxPdlpSolver {
     }
 
   private:
+    friend struct detail::BatchDriver;
+    MlxPdlpSolver(int num_vars, int num_cons, const int *row_ptr, const int *col_ind,
+                  const double *values, const double *var_lb, const double *var_ub,
+                  const double *con_lb, const double *con_ub, const double *objective,
+                  double offset, const pdhg_parameters_t *params,
+                  const double *primal_start, const double *dual_start,
+                  const double *reduced_cost_start, mx::Device device,
+                  const MlxPdlpSolver *prepared, bool force_sparse);
+    void initialize_solve();
+    mlxpdlp_result_t *finish_solve();
+    std::shared_ptr<detail::SolverMatrixStorage> matrix_;
+    const MlxPdlpSolver *prepared_matrix_ = nullptr;
     MlxPdlpState s_;
     pdhg_parameters_t params_;
     [[maybe_unused]] detail::PresolveContext *presolve_context_ = nullptr;
@@ -441,9 +455,6 @@ class MlxPdlpSolver {
     bool has_reduced_cost_start_ = false;
     std::vector<double> warm_reduced_cost_;
     double original_objective_constant_ = 0.0;
-    std::vector<int> original_row_ptr_;
-    std::vector<int> original_col_ind_;
-    std::vector<double> original_matrix_values_;
     std::vector<double> original_objective_;
     std::vector<double> original_variable_lower_bound_;
     std::vector<double> original_variable_upper_bound_;
@@ -457,9 +468,6 @@ class MlxPdlpSolver {
     int working_num_constraints_ = 0;
     int working_num_nonzeros_ = 0;
     double working_objective_constant_ = 0.0;
-    std::vector<int> working_row_ptr_;
-    std::vector<int> working_col_ind_;
-    std::vector<double> working_matrix_values_;
     std::vector<double> working_objective_;
     std::vector<double> working_variable_lower_bound_;
     std::vector<double> working_variable_upper_bound_;
@@ -470,31 +478,9 @@ class MlxPdlpSolver {
     // are preconditioned on the host in double precision, then rounded once
     // when the final Metal buffers are materialized. The transpose-source map
     // mirrors those final values into A^T without atomics.
-    std::vector<int32_t> sparse_a_row_ptr_host_;
-    std::vector<int32_t> sparse_a_col_ind_host_;
-    std::vector<double> sparse_a_values_host_;
-    std::vector<int32_t> sparse_at_row_ptr_host_;
-    std::vector<int32_t> sparse_at_col_ind_host_;
-    std::vector<int32_t> sparse_at_source_index_;
-    std::vector<double> sparse_con_rescale_host_;
-    std::vector<double> sparse_var_rescale_host_;
 
-    mx::array sparse_a_row_ptr_ = _mlx_empty_array();
-    mx::array sparse_a_col_ind_ = _mlx_empty_array();
-    mx::array sparse_a_values_ = _mlx_empty_array();
-    mx::array sparse_a_work_offsets_ = _mlx_empty_array();
-    mx::array sparse_a_work_rows_ = _mlx_empty_array();
-    int sparse_a_work_item_count_ = 0;
-    mx::array sparse_at_row_ptr_ = _mlx_empty_array();
-    mx::array sparse_at_col_ind_ = _mlx_empty_array();
-    mx::array sparse_at_values_ = _mlx_empty_array();
-    mx::array sparse_at_work_offsets_ = _mlx_empty_array();
-    mx::array sparse_at_work_rows_ = _mlx_empty_array();
-    int sparse_at_work_item_count_ = 0;
-    double sparse_frobenius_norm_ = 0.0;
     bool sparse_metal_candidate_ = false;
     bool sparse_cpu_candidate_ = false;
-    std::shared_ptr<detail::CpuSparseMatrix> sparse_cpu_matrix_;
     bool invalid_fixed_point_metric_ = false;
     double restart_relative_primal_residual_ = 0.0;
 
@@ -579,12 +565,20 @@ class MlxPdlpSolver {
     int fused_eval_batch_size() const;
     void mlx_compute_fixed_point_error();
     void mlx_compute_residual();
+    mx::array build_residual_metrics();
+    void publish_residual_metrics(const double *values);
+    void publish_fixed_point_metrics(double primal_norm, double dual_norm, double cross_term);
+    void mlx_perform_restart(double primal_dist, double dual_dist);
     void mlx_save_best_iterate();
     void mlx_restore_best_iterate();
     bool mlx_recover_numerical_failure();
     void mlx_primal_feasibility_polish();
     void mlx_dual_feasibility_polish();
     void mlx_compute_infeasibility_information();
+    mx::array build_infeasibility_metrics(const mx::array *primal_product = nullptr,
+                                         const mx::array *dual_product = nullptr);
+    void publish_infeasibility_metrics(const double *values);
+    bool infeasibility_metrics_ready_ = false;
     void mlx_perform_restart();
 
     // ---- Termination / restart checks ----

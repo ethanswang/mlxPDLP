@@ -1,4 +1,5 @@
 #include "mlxPDLP/solver.h"
+#include "mlxPDLP/batch_solver.h"
 #include "pdhg_control.h"
 #include <algorithm>
 #include <cmath>
@@ -118,6 +119,27 @@ static void spectral_regression(mx::Device device, bool conservative,
         require(state.singular_value_iterations == 0, "conservative mode ran power iteration");
     } else {
         require(state.step_size_reductions > 0, "adversary did not exercise numerical recovery");
+    }
+    if (device.type == mx::Device::gpu && !conservative) {
+        SharedMatrixPlan plan(size,size,row_ptr.data(),col_ind.data(),matrix.data(),&params,device);
+        std::vector<BatchProblem> members(4);
+        for (auto &member : members) {
+            member.objective=objective;
+            member.constraint_lower_bounds=member.constraint_upper_bounds=std::vector<double>(size,0);
+        }
+        members[1].constraint_lower_bounds=members[1].constraint_upper_bounds=exact;
+        BatchOptions options;options.execution=BatchExecution::shared;
+        auto batch=plan.solve_batch(members,options);
+        require(batch.results[1].step_size_reductions>0,"shared adversary did not exercise recovery");
+        for (int member=0;member<4;++member) {
+            const auto &r=batch.results[member];
+            require(r.result->termination_reason==TERMINATION_REASON_OPTIMAL,"shared recovery failed to converge");
+            require(r.result->total_count<=iteration_limit,"shared recovery exceeded the member limit");
+            if (member!=1) require(r.step_size_reductions==0,"one member's recovery changed its neighbor");
+            for (int j=0;j<size;++j)
+                require(std::abs(r.result->primal_solution[j]-(member==1?exact[j]:0))<1e-3,
+                        "shared recovery returned an incorrect original-model solution");
+        }
     }
 }
 

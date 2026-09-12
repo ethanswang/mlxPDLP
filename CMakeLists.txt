@@ -141,7 +141,8 @@ function(mlxpdlp_enable_warnings target)
 endfunction()
 
 # Solver library
-add_library(mlxpdlp_solver STATIC src/solver.cpp src/host_double_polish.cpp)
+add_library(mlxpdlp_solver STATIC src/solver.cpp src/host_double_polish.cpp
+    src/shared_matrix.cpp src/batch_solver.cpp)
 add_library(mlxPDLP::solver ALIAS mlxpdlp_solver)
 set_target_properties(mlxpdlp_solver PROPERTIES
     EXPORT_NAME solver
@@ -331,6 +332,12 @@ if(MLXPDLP_BUILD_BENCHMARKS)
     endif()
     mlxpdlp_enable_warnings(mlxpdlp_lpfeas_benchmark)
 
+    add_executable(mlxpdlp_batch_lp_benchmark benchmarks/batch_lp_benchmark.cpp)
+    add_dependencies(mlxpdlp_batch_lp_benchmark mlxpdlp_benchmark_provenance)
+    target_include_directories(mlxpdlp_batch_lp_benchmark PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_libraries(mlxpdlp_batch_lp_benchmark PRIVATE mlxpdlp_lpfeas_support)
+    mlxpdlp_enable_warnings(mlxpdlp_batch_lp_benchmark)
+
     add_executable(mlxpdlp_mps_inspect benchmarks/mps_inspect.cpp)
     target_link_libraries(mlxpdlp_mps_inspect PRIVATE mlxPDLP::mps)
     mlxpdlp_enable_warnings(mlxpdlp_mps_inspect)
@@ -341,6 +348,17 @@ if(BUILD_TESTING)
     add_test(NAME bootstrap_dependency_policy
         COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bootstrap.sh"
                    "${CMAKE_CURRENT_SOURCE_DIR}")
+
+    # Workload qualification is independent of MLX/Metal and uses only the
+    # Python standard library. Do not require Python for C++-only consumers.
+    find_package(Python3 3.9 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME batch_lp_trace
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_batch_lp_trace.py")
+        set_tests_properties(batch_lp_trace PROPERTIES
+            LABELS "batch;qualification" TIMEOUT 30)
+    endif()
 
     add_executable(mlxpdlp_mlx_basic_test tests/test_mlx_basic.cpp)
     target_link_libraries(mlxpdlp_mlx_basic_test PRIVATE MLX::MLX)
@@ -373,6 +391,24 @@ if(BUILD_TESTING)
     target_link_libraries(mlxpdlp_metal_spmv_test PRIVATE mlxPDLP::solver)
     mlxpdlp_enable_warnings(mlxpdlp_metal_spmv_test)
     add_test(NAME metal_spmv COMMAND mlxpdlp_metal_spmv_test)
+
+    add_executable(mlxpdlp_metal_spmm_test tests/test_metal_spmm.cpp)
+    target_include_directories(mlxpdlp_metal_spmm_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(mlxpdlp_metal_spmm_test PRIVATE mlxPDLP::solver)
+    mlxpdlp_enable_warnings(mlxpdlp_metal_spmm_test)
+    add_test(NAME metal_spmm COMMAND mlxpdlp_metal_spmm_test)
+    add_executable(mlxpdlp_batch_solver_test tests/test_batch_solver.cpp)
+    target_link_libraries(mlxpdlp_batch_solver_test PRIVATE mlxPDLP::solver)
+    mlxpdlp_enable_warnings(mlxpdlp_batch_solver_test)
+    add_test(NAME batch_solver_cpu COMMAND mlxpdlp_batch_solver_test cpu)
+    add_test(NAME batch_solver_metal COMMAND mlxpdlp_batch_solver_test gpu)
+    add_executable(mlxpdlp_shared_matrix_test tests/test_shared_matrix.cpp)
+    target_link_libraries(mlxpdlp_shared_matrix_test PRIVATE mlxPDLP::solver)
+    mlxpdlp_enable_warnings(mlxpdlp_shared_matrix_test)
+    add_test(NAME shared_matrix COMMAND mlxpdlp_shared_matrix_test)
+    set_tests_properties(shared_matrix PROPERTIES LABELS "batch;regression" TIMEOUT 180 SKIP_RETURN_CODE 77)
+    set_tests_properties(metal_spmm batch_solver_cpu batch_solver_metal PROPERTIES
+        LABELS "batch;regression" TIMEOUT 180 SKIP_RETURN_CODE 77)
     set_tests_properties(metal_spmv PROPERTIES SKIP_RETURN_CODE 77)
     add_executable(mlxpdlp_metal_batch_test tests/test_metal_batch.cpp)
     target_link_libraries(mlxpdlp_metal_batch_test PRIVATE mlxPDLP::solver)
@@ -526,6 +562,7 @@ install(TARGETS ${MLXPDLP_INSTALL_TARGETS}
 )
 install(FILES
     include/mlxPDLP/solver.h
+    include/mlxPDLP/batch_solver.h
     include/mlxPDLP/version.h
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/mlxPDLP"
 )
@@ -564,6 +601,6 @@ install(FILES
 install(FILES README.md LICENSE CHANGELOG.md
     DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/mlxPDLP"
 )
-install(FILES docs/architecture.md
+install(FILES docs/architecture.md docs/batch_solver.md
     DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/mlxPDLP/docs"
 )

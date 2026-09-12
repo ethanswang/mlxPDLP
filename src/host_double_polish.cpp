@@ -16,6 +16,7 @@ limitations under the License.
 
 #include "cpu_sparse_matrix.h"
 #include "mlxPDLP/solver.h"
+#include "shared_matrix.h"
 #include "pdhg_control.h"
 
 #include <algorithm>
@@ -119,10 +120,10 @@ void MlxPdlpSolver::host_double_polish(mlxpdlp_result_t *result,
     const double objective_constant =
         working_model ? working_objective_constant_
                       : original_objective_constant_;
-    const auto &row_ptr = working_model ? working_row_ptr_ : original_row_ptr_;
-    const auto &col_ind = working_model ? working_col_ind_ : original_col_ind_;
+    const auto &row_ptr = working_model ? matrix_->working_row_ptr_ : matrix_->original_row_ptr_;
+    const auto &col_ind = working_model ? matrix_->working_col_ind_ : matrix_->original_col_ind_;
     const auto &matrix_values =
-        working_model ? working_matrix_values_ : original_matrix_values_;
+        working_model ? matrix_->working_matrix_values_ : matrix_->original_matrix_values_;
     const auto &model_objective =
         working_model ? working_objective_ : original_objective_;
     const auto &model_variable_lower =

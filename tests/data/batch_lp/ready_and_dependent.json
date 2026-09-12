@@ -1,0 +1,875 @@
+{
+  "application": {
+    "latency_limit_ns": 1000,
+    "memory_limit_bytes": 1048576,
+    "scheduling_policy": "serial FIFO",
+    "wall_time_ns": 100
+  },
+  "matrices": {
+    "a": {
+      "col_indices": [
+        0,
+        0,
+        1
+      ],
+      "num_constraints": 1,
+      "num_variables": 2,
+      "row_ptr": [
+        0,
+        3
+      ],
+      "values": [
+        0.5,
+        0.5,
+        1.0
+      ]
+    }
+  },
+  "requests": [
+    {
+      "construct_ns": 2,
+      "data": {
+        "constraint_lower_bounds": [
+          1.0
+        ],
+        "constraint_upper_bounds": [
+          1.0
+        ],
+        "dual_start": null,
+        "objective": [
+          1.0,
+          2.0
+        ],
+        "objective_constant": 0.0,
+        "primal_start": null,
+        "reduced_cost_start": null,
+        "variable_lower_bounds": [
+          0.0,
+          0.0
+        ],
+        "variable_upper_bounds": [
+          1.0,
+          1.0
+        ]
+      },
+      "depends_on": [],
+      "device": "cpu",
+      "end_ns": 10,
+      "family": "objectives",
+      "id": "0",
+      "iterations": 1,
+      "matrix_id": "a",
+      "parameters": {
+        "bound_objective_rescaling": true,
+        "conditional_termination_evaluation": true,
+        "conservative_step_size": false,
+        "curtis_reid_iterations": 0,
+        "feasibility_polishing": false,
+        "geometric_mean_iterations": 12,
+        "has_pock_chambolle_alpha": true,
+        "host_double_early_handoff": true,
+        "host_double_polishing": false,
+        "host_double_polishing_iteration_limit": 50000,
+        "host_double_polishing_time_sec_limit": 30.0,
+        "host_double_residual_evaluation": false,
+        "l_inf_ruiz_iterations": 10,
+        "matrix_zero_tol": 1e-09,
+        "metal_fused_kernels": true,
+        "metal_iteration_batching": true,
+        "optimality_norm": 0,
+        "pock_chambolle_alpha": 1.0,
+        "presolve": false,
+        "presolve_doubleton_equations": true,
+        "presolve_dual_fix": true,
+        "presolve_finite_bound_tightening": true,
+        "presolve_parallel_columns": true,
+        "presolve_parallel_rows": true,
+        "presolve_primal_propagation": false,
+        "presolve_singleton_columns": false,
+        "reflection_coefficient": 1.0,
+        "restart_params": {
+          "artificial_restart_threshold": 0.36,
+          "i_smooth": 0.3,
+          "k_d": 0.0,
+          "k_i": 0.01,
+          "k_p": 0.99,
+          "necessary_reduction_for_restart": 0.5,
+          "sufficient_reduction_for_restart": 0.2
+        },
+        "restart_policy": 0,
+        "sv_max_iter": 200,
+        "sv_tol": 0.0001,
+        "termination_criteria": {
+          "eps_feas_polish_relative": 1e-06,
+          "eps_feasible_relative": 1e-06,
+          "eps_infeasible_relative": 1e-14,
+          "eps_optimal_relative": 1e-06,
+          "iteration_limit": 2000,
+          "time_sec_limit": 10.0
+        },
+        "termination_evaluation_frequency": 200,
+        "verbose": false
+      },
+      "ready_ns": 0,
+      "rescale_ns": 1,
+      "solve_ns": 8,
+      "start_ns": 0,
+      "termination": "OPTIMAL"
+    },
+    {
+      "construct_ns": 2,
+      "data": {
+        "constraint_lower_bounds": [
+          1.0
+        ],
+        "constraint_upper_bounds": [
+          1.0
+        ],
+        "dual_start": null,
+        "objective": [
+          2.0,
+          2.0
+        ],
+        "objective_constant": 1.0,
+        "primal_start": null,
+        "reduced_cost_start": null,
+        "variable_lower_bounds": [
+          0.0,
+          0.0
+        ],
+        "variable_upper_bounds": [
+          1.0,
+          1.0
+        ]
+      },
+      "depends_on": [],
+      "device": "cpu",
+      "end_ns": 20,
+      "family": "objectives",
+      "id": "1",
+      "iterations": 2,
+      "matrix_id": "a",
+      "parameters": {
+        "bound_objective_rescaling": true,
+        "conditional_termination_evaluation": true,
+        "conservative_step_size": false,
+        "curtis_reid_iterations": 0,
+        "feasibility_polishing": false,
+        "geometric_mean_iterations": 12,
+        "has_pock_chambolle_alpha": true,
+        "host_double_early_handoff": true,
+        "host_double_polishing": false,
+        "host_double_polishing_iteration_limit": 50000,
+        "host_double_polishing_time_sec_limit": 30.0,
+        "host_double_residual_evaluation": false,
+        "l_inf_ruiz_iterations": 10,
+        "matrix_zero_tol": 1e-09,
+        "metal_fused_kernels": true,
+        "metal_iteration_batching": true,
+        "optimality_norm": 0,
+        "pock_chambolle_alpha": 1.0,
+        "presolve": false,
+        "presolve_doubleton_equations": true,
+        "presolve_dual_fix": true,
+        "presolve_finite_bound_tightening": true,
+        "presolve_parallel_columns": true,
+        "presolve_parallel_rows": true,
+        "presolve_primal_propagation": false,
+        "presolve_singleton_columns": false,
+        "reflection_coefficient": 1.0,
+        "restart_params": {
+          "artificial_restart_threshold": 0.36,
+          "i_smooth": 0.3,
+          "k_d": 0.0,
+          "k_i": 0.01,
+          "k_p": 0.99,
+          "necessary_reduction_for_restart": 0.5,
+          "sufficient_reduction_for_restart": 0.2
+        },
+        "restart_policy": 0,
+        "sv_max_iter": 200,
+        "sv_tol": 0.0001,
+        "termination_criteria": {
+          "eps_feas_polish_relative": 1e-06,
+          "eps_feasible_relative": 1e-06,
+          "eps_infeasible_relative": 1e-14,
+          "eps_optimal_relative": 1e-06,
+          "iteration_limit": 2000,
+          "time_sec_limit": 10.0
+        },
+        "termination_evaluation_frequency": 200,
+        "verbose": false
+      },
+      "ready_ns": 0,
+      "rescale_ns": 1,
+      "solve_ns": 8,
+      "start_ns": 10,
+      "termination": "OPTIMAL"
+    },
+    {
+      "construct_ns": 2,
+      "data": {
+        "constraint_lower_bounds": [
+          1.0
+        ],
+        "constraint_upper_bounds": [
+          1.0
+        ],
+        "dual_start": null,
+        "objective": [
+          3.0,
+          2.0
+        ],
+        "objective_constant": 2.0,
+        "primal_start": null,
+        "reduced_cost_start": null,
+        "variable_lower_bounds": [
+          0.0,
+          0.0
+        ],
+        "variable_upper_bounds": [
+          1.0,
+          1.0
+        ]
+      },
+      "depends_on": [],
+      "device": "cpu",
+      "end_ns": 30,
+      "family": "objectives",
+      "id": "2",
+      "iterations": 3,
+      "matrix_id": "a",
+      "parameters": {
+        "bound_objective_rescaling": true,
+        "conditional_termination_evaluation": true,
+        "conservative_step_size": false,
+        "curtis_reid_iterations": 0,
+        "feasibility_polishing": false,
+        "geometric_mean_iterations": 12,
+        "has_pock_chambolle_alpha": true,
+        "host_double_early_handoff": true,
+        "host_double_polishing": false,
+        "host_double_polishing_iteration_limit": 50000,
+        "host_double_polishing_time_sec_limit": 30.0,
+        "host_double_residual_evaluation": false,
+        "l_inf_ruiz_iterations": 10,
+        "matrix_zero_tol": 1e-09,
+        "metal_fused_kernels": true,
+        "metal_iteration_batching": true,
+        "optimality_norm": 0,
+        "pock_chambolle_alpha": 1.0,
+        "presolve": false,
+        "presolve_doubleton_equations": true,
+        "presolve_dual_fix": true,
+        "presolve_finite_bound_tightening": true,
+        "presolve_parallel_columns": true,
+        "presolve_parallel_rows": true,
+        "presolve_primal_propagation": false,
+        "presolve_singleton_columns": false,
+        "reflection_coefficient": 1.0,
+        "restart_params": {
+          "artificial_restart_threshold": 0.36,
+          "i_smooth": 0.3,
+          "k_d": 0.0,
+          "k_i": 0.01,
+          "k_p": 0.99,
+          "necessary_reduction_for_restart": 0.5,
+          "sufficient_reduction_for_restart": 0.2
+        },
+        "restart_policy": 0,
+        "sv_max_iter": 200,
+        "sv_tol": 0.0001,
+        "termination_criteria": {
+          "eps_feas_polish_relative": 1e-06,
+          "eps_feasible_relative": 1e-06,
+          "eps_infeasible_relative": 1e-14,
+          "eps_optimal_relative": 1e-06,
+          "iteration_limit": 2000,
+          "time_sec_limit": 10.0
+        },
+        "termination_evaluation_frequency": 200,
+        "verbose": false
+      },
+      "ready_ns": 0,
+      "rescale_ns": 1,
+      "solve_ns": 8,
+      "start_ns": 20,
+      "termination": "OPTIMAL"
+    },
+    {
+      "construct_ns": 2,
+      "data": {
+        "constraint_lower_bounds": [
+          1.0
+        ],
+        "constraint_upper_bounds": [
+          1.0
+        ],
+        "dual_start": null,
+        "objective": [
+          4.0,
+          2.0
+        ],
+        "objective_constant": 3.0,
+        "primal_start": null,
+        "reduced_cost_start": null,
+        "variable_lower_bounds": [
+          0.0,
+          0.0
+        ],
+        "variable_upper_bounds": [
+          1.0,
+          1.0
+        ]
+      },
+      "depends_on": [],
+      "device": "cpu",
+      "end_ns": 40,
+      "family": "objectives",
+      "id": "3",
+      "iterations": 4,
+      "matrix_id": "a",
+      "parameters": {
+        "bound_objective_rescaling": true,
+        "conditional_termination_evaluation": true,
+        "conservative_step_size": false,
+        "curtis_reid_iterations": 0,
+        "feasibility_polishing": false,
+        "geometric_mean_iterations": 12,
+        "has_pock_chambolle_alpha": true,
+        "host_double_early_handoff": true,
+        "host_double_polishing": false,
+        "host_double_polishing_iteration_limit": 50000,
+        "host_double_polishing_time_sec_limit": 30.0,
+        "host_double_residual_evaluation": false,
+        "l_inf_ruiz_iterations": 10,
+        "matrix_zero_tol": 1e-09,
+        "metal_fused_kernels": true,
+        "metal_iteration_batching": true,
+        "optimality_norm": 0,
+        "pock_chambolle_alpha": 1.0,
+        "presolve": false,
+        "presolve_doubleton_equations": true,
+        "presolve_dual_fix": true,
+        "presolve_finite_bound_tightening": true,
+        "presolve_parallel_columns": true,
+        "presolve_parallel_rows": true,
+        "presolve_primal_propagation": false,
+        "presolve_singleton_columns": false,
+        "reflection_coefficient": 1.0,
+        "restart_params": {
+          "artificial_restart_threshold": 0.36,
+          "i_smooth": 0.3,
+          "k_d": 0.0,
+          "k_i": 0.01,
+          "k_p": 0.99,
+          "necessary_reduction_for_restart": 0.5,
+          "sufficient_reduction_for_restart": 0.2
+        },
+        "restart_policy": 0,
+        "sv_max_iter": 200,
+        "sv_tol": 0.0001,
+        "termination_criteria": {
+          "eps_feas_polish_relative": 1e-06,
+          "eps_feasible_relative": 1e-06,
+          "eps_infeasible_relative": 1e-14,
+          "eps_optimal_relative": 1e-06,
+          "iteration_limit": 2000,
+          "time_sec_limit": 10.0
+        },
+        "termination_evaluation_frequency": 200,
+        "verbose": false
+      },
+      "ready_ns": 0,
+      "rescale_ns": 1,
+      "solve_ns": 8,
+      "start_ns": 30,
+      "termination": "OPTIMAL"
+    },
+    {
+      "construct_ns": 2,
+      "data": {
+        "constraint_lower_bounds": [
+          1.0
+        ],
+        "constraint_upper_bounds": [
+          1.0
+        ],
+        "dual_start": null,
+        "objective": [
+          5.0,
+          2.0
+        ],
+        "objective_constant": 4.0,
+        "primal_start": null,
+        "reduced_cost_start": null,
+        "variable_lower_bounds": [
+          0.0,
+          0.0
+        ],
+        "variable_upper_bounds": [
+          1.0,
+          1.0
+        ]
+      },
+      "depends_on": [
+        "3"
+      ],
+      "device": "cpu",
+      "end_ns": 50,
+      "family": "dependent-bounds",
+      "id": "4",
+      "iterations": 5,
+      "matrix_id": "a",
+      "parameters": {
+        "bound_objective_rescaling": true,
+        "conditional_termination_evaluation": true,
+        "conservative_step_size": false,
+        "curtis_reid_iterations": 0,
+        "feasibility_polishing": false,
+        "geometric_mean_iterations": 12,
+        "has_pock_chambolle_alpha": true,
+        "host_double_early_handoff": true,
+        "host_double_polishing": false,
+        "host_double_polishing_iteration_limit": 50000,
+        "host_double_polishing_time_sec_limit": 30.0,
+        "host_double_residual_evaluation": false,
+        "l_inf_ruiz_iterations": 10,
+        "matrix_zero_tol": 1e-09,
+        "metal_fused_kernels": true,
+        "metal_iteration_batching": true,
+        "optimality_norm": 0,
+        "pock_chambolle_alpha": 1.0,
+        "presolve": false,
+        "presolve_doubleton_equations": true,
+        "presolve_dual_fix": true,
+        "presolve_finite_bound_tightening": true,
+        "presolve_parallel_columns": true,
+        "presolve_parallel_rows": true,
+        "presolve_primal_propagation": false,
+        "presolve_singleton_columns": false,
+        "reflection_coefficient": 1.0,
+        "restart_params": {
+          "artificial_restart_threshold": 0.36,
+          "i_smooth": 0.3,
+          "k_d": 0.0,
+          "k_i": 0.01,
+          "k_p": 0.99,
+          "necessary_reduction_for_restart": 0.5,
+          "sufficient_reduction_for_restart": 0.2
+        },
+        "restart_policy": 0,
+        "sv_max_iter": 200,
+        "sv_tol": 0.0001,
+        "termination_criteria": {
+          "eps_feas_polish_relative": 1e-06,
+          "eps_feasible_relative": 1e-06,
+          "eps_infeasible_relative": 1e-14,
+          "eps_optimal_relative": 1e-06,
+          "iteration_limit": 2000,
+          "time_sec_limit": 10.0
+        },
+        "termination_evaluation_frequency": 200,
+        "verbose": false
+      },
+      "ready_ns": 40,
+      "rescale_ns": 1,
+      "solve_ns": 8,
+      "start_ns": 40,
+      "termination": "OPTIMAL"
+    },
+    {
+      "construct_ns": 2,
+      "data": {
+        "constraint_lower_bounds": [
+          1.0
+        ],
+        "constraint_upper_bounds": [
+          1.0
+        ],
+        "dual_start": null,
+        "objective": [
+          6.0,
+          2.0
+        ],
+        "objective_constant": 5.0,
+        "primal_start": null,
+        "reduced_cost_start": null,
+        "variable_lower_bounds": [
+          0.0,
+          0.0
+        ],
+        "variable_upper_bounds": [
+          1.0,
+          1.0
+        ]
+      },
+      "depends_on": [
+        "4"
+      ],
+      "device": "cpu",
+      "end_ns": 60,
+      "family": "dependent-bounds",
+      "id": "5",
+      "iterations": 6,
+      "matrix_id": "a",
+      "parameters": {
+        "bound_objective_rescaling": true,
+        "conditional_termination_evaluation": true,
+        "conservative_step_size": false,
+        "curtis_reid_iterations": 0,
+        "feasibility_polishing": false,
+        "geometric_mean_iterations": 12,
+        "has_pock_chambolle_alpha": true,
+        "host_double_early_handoff": true,
+        "host_double_polishing": false,
+        "host_double_polishing_iteration_limit": 50000,
+        "host_double_polishing_time_sec_limit": 30.0,
+        "host_double_residual_evaluation": false,
+        "l_inf_ruiz_iterations": 10,
+        "matrix_zero_tol": 1e-09,
+        "metal_fused_kernels": true,
+        "metal_iteration_batching": true,
+        "optimality_norm": 0,
+        "pock_chambolle_alpha": 1.0,
+        "presolve": false,
+        "presolve_doubleton_equations": true,
+        "presolve_dual_fix": true,
+        "presolve_finite_bound_tightening": true,
+        "presolve_parallel_columns": true,
+        "presolve_parallel_rows": true,
+        "presolve_primal_propagation": false,
+        "presolve_singleton_columns": false,
+        "reflection_coefficient": 1.0,
+        "restart_params": {
+          "artificial_restart_threshold": 0.36,
+          "i_smooth": 0.3,
+          "k_d": 0.0,
+          "k_i": 0.01,
+          "k_p": 0.99,
+          "necessary_reduction_for_restart": 0.5,
+          "sufficient_reduction_for_restart": 0.2
+        },
+        "restart_policy": 0,
+        "sv_max_iter": 200,
+        "sv_tol": 0.0001,
+        "termination_criteria": {
+          "eps_feas_polish_relative": 1e-06,
+          "eps_feasible_relative": 1e-06,
+          "eps_infeasible_relative": 1e-14,
+          "eps_optimal_relative": 1e-06,
+          "iteration_limit": 2000,
+          "time_sec_limit": 10.0
+        },
+        "termination_evaluation_frequency": 200,
+        "verbose": false
+      },
+      "ready_ns": 50,
+      "rescale_ns": 1,
+      "solve_ns": 8,
+      "start_ns": 50,
+      "termination": "OPTIMAL"
+    },
+    {
+      "construct_ns": 2,
+      "data": {
+        "constraint_lower_bounds": [
+          1.0
+        ],
+        "constraint_upper_bounds": [
+          1.0
+        ],
+        "dual_start": null,
+        "objective": [
+          7.0,
+          2.0
+        ],
+        "objective_constant": 6.0,
+        "primal_start": null,
+        "reduced_cost_start": null,
+        "variable_lower_bounds": [
+          0.0,
+          0.0
+        ],
+        "variable_upper_bounds": [
+          1.0,
+          1.0
+        ]
+      },
+      "depends_on": [
+        "5"
+      ],
+      "device": "cpu",
+      "end_ns": 70,
+      "family": "dependent-bounds",
+      "id": "6",
+      "iterations": 7,
+      "matrix_id": "a",
+      "parameters": {
+        "bound_objective_rescaling": true,
+        "conditional_termination_evaluation": true,
+        "conservative_step_size": false,
+        "curtis_reid_iterations": 0,
+        "feasibility_polishing": false,
+        "geometric_mean_iterations": 12,
+        "has_pock_chambolle_alpha": true,
+        "host_double_early_handoff": true,
+        "host_double_polishing": false,
+        "host_double_polishing_iteration_limit": 50000,
+        "host_double_polishing_time_sec_limit": 30.0,
+        "host_double_residual_evaluation": false,
+        "l_inf_ruiz_iterations": 10,
+        "matrix_zero_tol": 1e-09,
+        "metal_fused_kernels": true,
+        "metal_iteration_batching": true,
+        "optimality_norm": 0,
+        "pock_chambolle_alpha": 1.0,
+        "presolve": false,
+        "presolve_doubleton_equations": true,
+        "presolve_dual_fix": true,
+        "presolve_finite_bound_tightening": true,
+        "presolve_parallel_columns": true,
+        "presolve_parallel_rows": true,
+        "presolve_primal_propagation": false,
+        "presolve_singleton_columns": false,
+        "reflection_coefficient": 1.0,
+        "restart_params": {
+          "artificial_restart_threshold": 0.36,
+          "i_smooth": 0.3,
+          "k_d": 0.0,
+          "k_i": 0.01,
+          "k_p": 0.99,
+          "necessary_reduction_for_restart": 0.5,
+          "sufficient_reduction_for_restart": 0.2
+        },
+        "restart_policy": 0,
+        "sv_max_iter": 200,
+        "sv_tol": 0.0001,
+        "termination_criteria": {
+          "eps_feas_polish_relative": 1e-06,
+          "eps_feasible_relative": 1e-06,
+          "eps_infeasible_relative": 1e-14,
+          "eps_optimal_relative": 1e-06,
+          "iteration_limit": 2000,
+          "time_sec_limit": 10.0
+        },
+        "termination_evaluation_frequency": 200,
+        "verbose": false
+      },
+      "ready_ns": 60,
+      "rescale_ns": 1,
+      "solve_ns": 8,
+      "start_ns": 60,
+      "termination": "OPTIMAL"
+    },
+    {
+      "construct_ns": 2,
+      "data": {
+        "constraint_lower_bounds": [
+          1.0
+        ],
+        "constraint_upper_bounds": [
+          1.0
+        ],
+        "dual_start": null,
+        "objective": [
+          8.0,
+          2.0
+        ],
+        "objective_constant": 7.0,
+        "primal_start": null,
+        "reduced_cost_start": null,
+        "variable_lower_bounds": [
+          0.0,
+          0.0
+        ],
+        "variable_upper_bounds": [
+          1.0,
+          1.0
+        ]
+      },
+      "depends_on": [
+        "6"
+      ],
+      "device": "cpu",
+      "end_ns": 80,
+      "family": "dependent-bounds",
+      "id": "7",
+      "iterations": 8,
+      "matrix_id": "a",
+      "parameters": {
+        "bound_objective_rescaling": true,
+        "conditional_termination_evaluation": true,
+        "conservative_step_size": false,
+        "curtis_reid_iterations": 0,
+        "feasibility_polishing": false,
+        "geometric_mean_iterations": 12,
+        "has_pock_chambolle_alpha": true,
+        "host_double_early_handoff": true,
+        "host_double_polishing": false,
+        "host_double_polishing_iteration_limit": 50000,
+        "host_double_polishing_time_sec_limit": 30.0,
+        "host_double_residual_evaluation": false,
+        "l_inf_ruiz_iterations": 10,
+        "matrix_zero_tol": 1e-09,
+        "metal_fused_kernels": true,
+        "metal_iteration_batching": true,
+        "optimality_norm": 0,
+        "pock_chambolle_alpha": 1.0,
+        "presolve": false,
+        "presolve_doubleton_equations": true,
+        "presolve_dual_fix": true,
+        "presolve_finite_bound_tightening": true,
+        "presolve_parallel_columns": true,
+        "presolve_parallel_rows": true,
+        "presolve_primal_propagation": false,
+        "presolve_singleton_columns": false,
+        "reflection_coefficient": 1.0,
+        "restart_params": {
+          "artificial_restart_threshold": 0.36,
+          "i_smooth": 0.3,
+          "k_d": 0.0,
+          "k_i": 0.01,
+          "k_p": 0.99,
+          "necessary_reduction_for_restart": 0.5,
+          "sufficient_reduction_for_restart": 0.2
+        },
+        "restart_policy": 0,
+        "sv_max_iter": 200,
+        "sv_tol": 0.0001,
+        "termination_criteria": {
+          "eps_feas_polish_relative": 1e-06,
+          "eps_feasible_relative": 1e-06,
+          "eps_infeasible_relative": 1e-14,
+          "eps_optimal_relative": 1e-06,
+          "iteration_limit": 2000,
+          "time_sec_limit": 10.0
+        },
+        "termination_evaluation_frequency": 200,
+        "verbose": false
+      },
+      "ready_ns": 70,
+      "rescale_ns": 1,
+      "solve_ns": 8,
+      "start_ns": 70,
+      "termination": "OPTIMAL"
+    },
+    {
+      "construct_ns": 2,
+      "data": {
+        "constraint_lower_bounds": [
+          1.0
+        ],
+        "constraint_upper_bounds": [
+          1.0
+        ],
+        "dual_start": [
+          2.0
+        ],
+        "objective": [
+          9.0,
+          2.0
+        ],
+        "objective_constant": 8.0,
+        "primal_start": [
+          0.0,
+          1.0
+        ],
+        "reduced_cost_start": [
+          7.0,
+          0.0
+        ],
+        "variable_lower_bounds": [
+          0.0,
+          0.0
+        ],
+        "variable_upper_bounds": [
+          1.0,
+          1.0
+        ]
+      },
+      "depends_on": [
+        "7"
+      ],
+      "device": "cpu",
+      "end_ns": 90,
+      "family": "dependent-bounds",
+      "id": "8",
+      "iterations": 9,
+      "matrix_id": "a",
+      "parameters": {
+        "bound_objective_rescaling": true,
+        "conditional_termination_evaluation": true,
+        "conservative_step_size": false,
+        "curtis_reid_iterations": 0,
+        "feasibility_polishing": false,
+        "geometric_mean_iterations": 12,
+        "has_pock_chambolle_alpha": true,
+        "host_double_early_handoff": true,
+        "host_double_polishing": false,
+        "host_double_polishing_iteration_limit": 50000,
+        "host_double_polishing_time_sec_limit": 30.0,
+        "host_double_residual_evaluation": false,
+        "l_inf_ruiz_iterations": 10,
+        "matrix_zero_tol": 1e-09,
+        "metal_fused_kernels": true,
+        "metal_iteration_batching": true,
+        "optimality_norm": 0,
+        "pock_chambolle_alpha": 1.0,
+        "presolve": false,
+        "presolve_doubleton_equations": true,
+        "presolve_dual_fix": true,
+        "presolve_finite_bound_tightening": true,
+        "presolve_parallel_columns": true,
+        "presolve_parallel_rows": true,
+        "presolve_primal_propagation": false,
+        "presolve_singleton_columns": false,
+        "reflection_coefficient": 1.0,
+        "restart_params": {
+          "artificial_restart_threshold": 0.36,
+          "i_smooth": 0.3,
+          "k_d": 0.0,
+          "k_i": 0.01,
+          "k_p": 0.99,
+          "necessary_reduction_for_restart": 0.5,
+          "sufficient_reduction_for_restart": 0.2
+        },
+        "restart_policy": 0,
+        "sv_max_iter": 200,
+        "sv_tol": 0.0001,
+        "termination_criteria": {
+          "eps_feas_polish_relative": 1e-06,
+          "eps_feasible_relative": 1e-06,
+          "eps_infeasible_relative": 1e-14,
+          "eps_optimal_relative": 1e-06,
+          "iteration_limit": 2000,
+          "time_sec_limit": 10.0
+        },
+        "termination_evaluation_frequency": 200,
+        "verbose": false
+      },
+      "ready_ns": 80,
+      "rescale_ns": 1,
+      "solve_ns": 8,
+      "start_ns": 80,
+      "termination": "OPTIMAL"
+    }
+  ],
+  "schema": "mlxpdlp.batch_lp.trace.v1",
+  "source": {
+    "application": "protocol-example",
+    "build": "test",
+    "command": "python3 benchmarks/batch_lp_trace.py tests/data/batch_lp/ready_and_dependent.json --output /tmp/qualification.json",
+    "complete_capture": true,
+    "hardware": "test",
+    "kind": "synthetic",
+    "mlx_revision": "test",
+    "representative": false,
+    "revision": "test",
+    "scheduling_unchanged": true,
+    "selection": "Handwritten analytic LPs and artificial timestamps; never workload qualification evidence.",
+    "settings_complete": true,
+    "solver_revision": "test",
+    "workload_id": "ready-and-dependent-v1"
+  }
+}

@@ -28,6 +28,11 @@ tolerances are required.
 
 ## Core API
 
+For independently ready LPs with identical numeric CSR matrices, use
+[`SharedMatrixPlan.solve_batch`](batch_solver.md). It supports batch objectives,
+common or per-member bounds, masked warm starts, owned ordered results and
+explicit Metal SpMM execution. The ordinary `Solver` API below keeps its defaults.
+
 ```python
 solver = mlxpdlp.Solver(
     num_variables, num_constraints,

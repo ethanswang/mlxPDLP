@@ -34,4 +34,12 @@ std::vector<mlx::core::array> metal_minor_batch(const std::vector<mlx::core::arr
                                                 std::vector<BatchScalars> scalars,
                                                 mlx::core::Stream stream);
 
+// Separate interface for SpMM prototypes: [component, LP lane] arrays and a
+// [4, B_padded] coefficient block per iteration. Returns x, x_ref, y, y_ref.
+// Supports at most 256 padded LP lanes (Metal's 4096-byte inline-data limit).
+std::vector<mlx::core::array> metal_spmm_minor_batch(
+    const std::vector<mlx::core::array> &primal,
+    const std::vector<mlx::core::array> &dual,
+    std::vector<std::vector<float>> coefficients, mlx::core::Stream stream);
+
 } // namespace mlxpdlp::detail

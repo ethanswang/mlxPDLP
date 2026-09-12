@@ -35,7 +35,7 @@ minimum-version = "0.10"
 wheel.packages = ["mlxpdlp"]
 wheel.install-dir = "mlxpdlp"
 cmake.build-type = "Release"
-sdist.include = ["src/*.cpp", "CMakeLists.txt"]
+sdist.include = ["src/*.cpp", "src/*.h", "CMakeLists.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

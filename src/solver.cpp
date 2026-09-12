@@ -20,6 +20,7 @@ limitations under the License.
 */
 
 #include "mlxPDLP/solver.h"
+#include "shared_matrix.h"
 #include "cpu_sparse_matrix.h"
 #include "metal_minor_batch.h"
 #include "metal_spmv.h"
@@ -300,47 +301,47 @@ void MlxPdlpSolver::capture_sparse_matrix(int rows, int cols, const int *row_ptr
         throw std::invalid_argument("invalid CSR nonzero storage");
     }
 
-    sparse_a_row_ptr_host_.resize(static_cast<size_t>(rows) + 1);
+    matrix_->sparse_a_row_ptr_host_.resize(static_cast<size_t>(rows) + 1);
     for (int row = 0; row <= rows; ++row) {
         if (row_ptr[row] < 0 || (row > 0 && row_ptr[row] < row_ptr[row - 1]) ||
             row_ptr[row] > nnz) {
             throw std::invalid_argument("CSR row pointers must be monotone and in range");
         }
-        sparse_a_row_ptr_host_[static_cast<size_t>(row)] = row_ptr[row];
+        matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)] = row_ptr[row];
     }
 
-    sparse_a_col_ind_host_.resize(nnz);
-    sparse_a_values_host_.resize(nnz);
+    matrix_->sparse_a_col_ind_host_.resize(nnz);
+    matrix_->sparse_a_values_host_.resize(nnz);
     for (int k = 0; k < nnz; ++k) {
         if (col_ind[k] < 0 || col_ind[k] >= cols) {
             throw std::invalid_argument("CSR column index is out of range");
         }
-        sparse_a_col_ind_host_[static_cast<size_t>(k)] = col_ind[k];
-        sparse_a_values_host_[static_cast<size_t>(k)] = values[k];
+        matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)] = col_ind[k];
+        matrix_->sparse_a_values_host_[static_cast<size_t>(k)] = values[k];
     }
 
     // Build A^T in CSR order. Its values are populated after preconditioning
-    // from sparse_at_source_index_, so duplicate coordinates remain additive
+    // from matrix_->sparse_at_source_index_, so duplicate coordinates remain additive
     // exactly as they are in the input CSR matrix.
-    sparse_at_row_ptr_host_.assign(static_cast<size_t>(cols) + 1, 0);
-    for (int32_t col : sparse_a_col_ind_host_) {
-        ++sparse_at_row_ptr_host_[static_cast<size_t>(col) + 1];
+    matrix_->sparse_at_row_ptr_host_.assign(static_cast<size_t>(cols) + 1, 0);
+    for (int32_t col : matrix_->sparse_a_col_ind_host_) {
+        ++matrix_->sparse_at_row_ptr_host_[static_cast<size_t>(col) + 1];
     }
     for (int row = 0; row < cols; ++row) {
-        sparse_at_row_ptr_host_[static_cast<size_t>(row) + 1] +=
-            sparse_at_row_ptr_host_[static_cast<size_t>(row)];
+        matrix_->sparse_at_row_ptr_host_[static_cast<size_t>(row) + 1] +=
+            matrix_->sparse_at_row_ptr_host_[static_cast<size_t>(row)];
     }
 
-    sparse_at_col_ind_host_.resize(nnz);
-    sparse_at_source_index_.resize(nnz);
-    auto next = sparse_at_row_ptr_host_;
+    matrix_->sparse_at_col_ind_host_.resize(nnz);
+    matrix_->sparse_at_source_index_.resize(nnz);
+    auto next = matrix_->sparse_at_row_ptr_host_;
     for (int row = 0; row < rows; ++row) {
-        for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
-             k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
-            int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
+        for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+             k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+            int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
             int32_t target = next[static_cast<size_t>(col)]++;
-            sparse_at_col_ind_host_[static_cast<size_t>(target)] = row;
-            sparse_at_source_index_[static_cast<size_t>(target)] = k;
+            matrix_->sparse_at_col_ind_host_[static_cast<size_t>(target)] = row;
+            matrix_->sparse_at_source_index_[static_cast<size_t>(target)] = k;
         }
     }
 }
@@ -374,7 +375,22 @@ MlxPdlpSolver::MlxPdlpSolver(int num_vars, int num_cons, const int *csr_row_ptr,
                              const double *objective, double objective_constant,
                              const pdhg_parameters_t *params,
                              const double *primal_start, const double *dual_start,
-                             const double *reduced_cost_start, mx::Device device) {
+                             const double *reduced_cost_start, mx::Device device)
+    : MlxPdlpSolver(num_vars, num_cons, csr_row_ptr, csr_col_ind, csr_vals, var_lb,
+                    var_ub, con_lb, con_ub, objective, objective_constant, params,
+                    primal_start, dual_start, reduced_cost_start, device, nullptr, false) {}
+
+MlxPdlpSolver::MlxPdlpSolver(int num_vars, int num_cons, const int *csr_row_ptr,
+                             const int *csr_col_ind, const double *csr_vals,
+                             const double *var_lb, const double *var_ub,
+                             const double *con_lb, const double *con_ub,
+                             const double *objective, double objective_constant,
+                             const pdhg_parameters_t *params,
+                             const double *primal_start, const double *dual_start,
+                             const double *reduced_cost_start, mx::Device device,
+                             const MlxPdlpSolver *prepared, bool force_sparse)
+    : matrix_(prepared ? prepared->matrix_ : std::make_shared<detail::SolverMatrixStorage>()),
+      prepared_matrix_(prepared) {
     // Operations without an explicit StreamOrDevice use MLX's current default.
     // Keep that default scoped to this constructor so arrays and preprocessing
     // are placed on the device requested by the caller.
@@ -436,10 +452,12 @@ MlxPdlpSolver::MlxPdlpSolver(int num_vars, int num_cons, const int *csr_row_ptr,
     original_variable_upper_bound_ = copy_or_fill(var_ub, num_vars, inf());
     original_constraint_lower_bound_ = copy_or_fill(con_lb, num_cons, -inf());
     original_constraint_upper_bound_ = copy_or_fill(con_ub, num_cons, inf());
-    original_row_ptr_.assign(csr_row_ptr, csr_row_ptr + num_cons + 1);
+    if (!prepared) {
+    matrix_->original_row_ptr_.assign(csr_row_ptr, csr_row_ptr + num_cons + 1);
     if (original_num_nonzeros_ > 0) {
-        original_col_ind_.assign(csr_col_ind, csr_col_ind + original_num_nonzeros_);
-        original_matrix_values_.assign(csr_vals, csr_vals + original_num_nonzeros_);
+        matrix_->original_col_ind_.assign(csr_col_ind, csr_col_ind + original_num_nonzeros_);
+        matrix_->original_matrix_values_.assign(csr_vals, csr_vals + original_num_nonzeros_);
+    }
     }
 
     int working_num_vars = num_vars;
@@ -542,12 +560,12 @@ MlxPdlpSolver::MlxPdlpSolver(int num_vars, int num_cons, const int *csr_row_ptr,
             copy_or_fill(working_con_lb, working_num_cons, -inf());
         working_constraint_upper_bound_ =
             copy_or_fill(working_con_ub, working_num_cons, inf());
-        working_row_ptr_.assign(working_row_ptr,
+        matrix_->working_row_ptr_.assign(working_row_ptr,
                                 working_row_ptr + working_num_cons + 1);
         if (working_num_nonzeros > 0) {
-            working_col_ind_.assign(working_col_ind,
+            matrix_->working_col_ind_.assign(working_col_ind,
                                     working_col_ind + working_num_nonzeros);
-            working_matrix_values_.assign(working_values,
+            matrix_->working_matrix_values_.assign(working_values,
                                           working_values + working_num_nonzeros);
         }
     }
@@ -559,6 +577,16 @@ MlxPdlpSolver::MlxPdlpSolver(int num_vars, int num_cons, const int *csr_row_ptr,
     // Count nonzeros
     s_.nnz = working_num_nonzeros;
 
+    if (prepared) {
+        sparse_metal_candidate_ = prepared->sparse_metal_candidate_;
+        sparse_cpu_candidate_ = prepared->sparse_cpu_candidate_;
+        s_.sparse_metal_active = prepared->s_.sparse_metal_active;
+        s_.sparse_cpu_active = prepared->s_.sparse_cpu_active;
+        s_.sparse_a_spmv_strategy = prepared->s_.sparse_a_spmv_strategy;
+        s_.sparse_at_spmv_strategy = prepared->s_.sparse_at_spmv_strategy;
+        s_.A = prepared->s_.A;
+        s_.AT = prepared->s_.AT;
+    } else {
     capture_sparse_matrix(working_num_cons, working_num_vars, working_row_ptr, working_col_ind,
                           working_values);
 
@@ -581,16 +609,24 @@ MlxPdlpSolver::MlxPdlpSolver(int num_vars, int num_cons, const int *csr_row_ptr,
     (void)min_sparse_cpu_dense_elements;
 #endif
 
-    sparse_con_rescale_host_.assign(static_cast<size_t>(s_.m), 1.0);
-    sparse_var_rescale_host_.assign(static_cast<size_t>(s_.n), 1.0);
+    matrix_->sparse_con_rescale_host_.assign(static_cast<size_t>(s_.m), 1.0);
+    matrix_->sparse_var_rescale_host_.assign(static_cast<size_t>(s_.n), 1.0);
 
     // Sparse candidates remain in CSR throughout preprocessing and iteration.
     // Dense storage is retained only by small/dense CPU and Metal fallbacks.
+    if (force_sparse) {
+        sparse_metal_candidate_ = device.type == mx::Device::gpu;
+#ifdef MLXPDLP_HAS_ACCELERATE_SPARSE
+        sparse_cpu_candidate_ = device.type == mx::Device::cpu;
+#endif
+    }
     if (!sparse_metal_candidate_ && !sparse_cpu_candidate_) {
         s_.A = csr_to_dense(working_num_cons, working_num_vars, working_row_ptr, working_col_ind,
                             working_values);
         s_.AT = mx::transpose(s_.A);
         mx::eval(s_.A, s_.AT);
+    }
+
     }
 
     // Build bound arrays (host → mx::array)
@@ -810,15 +846,15 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
     std::vector<int> touched_columns;
     for (int row = 0; row < s_.m; ++row) {
         touched_columns.clear();
-        for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
-             k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
-            int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
+        for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+             k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+            int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
             if (last_seen_row[static_cast<size_t>(col)] != row) {
                 last_seen_row[static_cast<size_t>(col)] = row;
                 row_col_sums[static_cast<size_t>(col)] = 0.0;
                 touched_columns.push_back(col);
             }
-            row_col_sums[static_cast<size_t>(col)] += sparse_a_values_host_[static_cast<size_t>(k)];
+            row_col_sums[static_cast<size_t>(col)] += matrix_->sparse_a_values_host_[static_cast<size_t>(k)];
         }
         for (int col : touched_columns) {
             double value = row_col_sums[static_cast<size_t>(col)];
@@ -827,25 +863,25 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
             }
         }
     }
-    sparse_frobenius_norm_ = std::sqrt(squared_frobenius_norm);
+    matrix_->sparse_frobenius_norm_ = std::sqrt(squared_frobenius_norm);
 
-    const int sparse_nnz = static_cast<int>(sparse_a_values_host_.size());
+    const int sparse_nnz = static_cast<int>(matrix_->sparse_a_values_host_.size());
     std::vector<float> matrix_values(static_cast<size_t>(sparse_nnz));
     std::vector<float> transpose_values(static_cast<size_t>(sparse_nnz));
     for (int k = 0; k < sparse_nnz; ++k) {
         matrix_values[static_cast<size_t>(k)] =
-            static_cast<float>(sparse_a_values_host_[static_cast<size_t>(k)]);
+            static_cast<float>(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]);
         transpose_values[static_cast<size_t>(k)] = static_cast<float>(
-            sparse_a_values_host_[static_cast<size_t>(sparse_at_source_index_[static_cast<size_t>(k)])]);
+            matrix_->sparse_a_values_host_[static_cast<size_t>(matrix_->sparse_at_source_index_[static_cast<size_t>(k)])]);
     }
 
-    sparse_a_row_ptr_ = mx::array(sparse_a_row_ptr_host_.data(), {s_.m + 1}, mx::int32);
-    sparse_a_col_ind_ = detail::metal_column_indices(sparse_a_col_ind_host_, s_.n);
-    sparse_a_values_ = mx::array(matrix_values.data(), {sparse_nnz}, mx::float32);
+    matrix_->sparse_a_row_ptr_ = mx::array(matrix_->sparse_a_row_ptr_host_.data(), {s_.m + 1}, mx::int32);
+    matrix_->sparse_a_col_ind_ = detail::metal_column_indices(matrix_->sparse_a_col_ind_host_, s_.n);
+    matrix_->sparse_a_values_ = mx::array(matrix_values.data(), {sparse_nnz}, mx::float32);
 
-    sparse_at_row_ptr_ = mx::array(sparse_at_row_ptr_host_.data(), {s_.n + 1}, mx::int32);
-    sparse_at_col_ind_ = detail::metal_column_indices(sparse_at_col_ind_host_, s_.m);
-    sparse_at_values_ = mx::array(transpose_values.data(), {sparse_nnz}, mx::float32);
+    matrix_->sparse_at_row_ptr_ = mx::array(matrix_->sparse_at_row_ptr_host_.data(), {s_.n + 1}, mx::int32);
+    matrix_->sparse_at_col_ind_ = detail::metal_column_indices(matrix_->sparse_at_col_ind_host_, s_.m);
+    matrix_->sparse_at_values_ = mx::array(transpose_values.data(), {sparse_nnz}, mx::float32);
 
     struct RowProfile {
         int rows = 0;
@@ -971,9 +1007,9 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
 
 
     s_.sparse_a_spmv_strategy =
-        select_strategy(profile_rows(sparse_a_row_ptr_host_, s_.m));
+        select_strategy(profile_rows(matrix_->sparse_a_row_ptr_host_, s_.m));
     s_.sparse_at_spmv_strategy =
-        select_strategy(profile_rows(sparse_at_row_ptr_host_, s_.n));
+        select_strategy(profile_rows(matrix_->sparse_at_row_ptr_host_, s_.n));
 
     auto prepare_adaptive_work = [&](const std::vector<int32_t> &row_ptr, int row_count,
                                      SparseMetalSpmvStrategy strategy,
@@ -989,12 +1025,12 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
                               {static_cast<int>(work.rows.size())}, mx::int32);
         work_item_count = work.item_count;
     };
-    prepare_adaptive_work(sparse_a_row_ptr_host_, s_.m, s_.sparse_a_spmv_strategy,
-                          sparse_a_work_offsets_, sparse_a_work_rows_,
-                          sparse_a_work_item_count_);
-    prepare_adaptive_work(sparse_at_row_ptr_host_, s_.n, s_.sparse_at_spmv_strategy,
-                          sparse_at_work_offsets_, sparse_at_work_rows_,
-                          sparse_at_work_item_count_);
+    prepare_adaptive_work(matrix_->sparse_a_row_ptr_host_, s_.m, s_.sparse_a_spmv_strategy,
+                          matrix_->sparse_a_work_offsets_, matrix_->sparse_a_work_rows_,
+                          matrix_->sparse_a_work_item_count_);
+    prepare_adaptive_work(matrix_->sparse_at_row_ptr_host_, s_.n, s_.sparse_at_spmv_strategy,
+                          matrix_->sparse_at_work_offsets_, matrix_->sparse_at_work_rows_,
+                          matrix_->sparse_at_work_item_count_);
 
     s_.sparse_metal_active = true;
     mx::synchronize(s_.stream);
@@ -1014,15 +1050,15 @@ void MlxPdlpSolver::prepare_sparse_metal_backend() {
             return "unknown";
         };
         double sparse_mib = (2.0 * sparse_nnz * sizeof(float) +
-                             sparse_a_col_ind_.nbytes() + sparse_at_col_ind_.nbytes() +
+                             matrix_->sparse_a_col_ind_.nbytes() + matrix_->sparse_at_col_ind_.nbytes() +
                              (static_cast<double>(s_.m) + s_.n + 2.0) * sizeof(int32_t)) /
                             (1024.0 * 1024.0);
         printf("  sparse Metal SpMV enabled (CSR + transpose CSR: %.2f MiB; "
                "strategies A=%s, A^T=%s; adaptive work items A=%d, A^T=%d; "
                "fused iteration batch=%d)\n",
                sparse_mib, strategy_name(s_.sparse_a_spmv_strategy),
-               strategy_name(s_.sparse_at_spmv_strategy), sparse_a_work_item_count_,
-               sparse_at_work_item_count_, fused_eval_batch_size());
+               strategy_name(s_.sparse_at_spmv_strategy), matrix_->sparse_a_work_item_count_,
+               matrix_->sparse_at_work_item_count_, fused_eval_batch_size());
     }
 }
 
@@ -1033,15 +1069,15 @@ void MlxPdlpSolver::prepare_sparse_cpu_backend() {
     }
 
     auto matrix = std::make_shared<detail::CpuSparseMatrix>(s_.m, s_.n);
-    matrix->assign_csr(s_.m, sparse_a_row_ptr_host_.data(), sparse_a_col_ind_host_.data(),
-                       sparse_a_values_host_.data());
-    sparse_frobenius_norm_ = matrix->frobenius_norm;
-    sparse_cpu_matrix_ = std::move(matrix);
+    matrix->assign_csr(s_.m, matrix_->sparse_a_row_ptr_host_.data(), matrix_->sparse_a_col_ind_host_.data(),
+                       matrix_->sparse_a_values_host_.data());
+    matrix_->sparse_frobenius_norm_ = matrix->frobenius_norm;
+    matrix_->sparse_cpu_matrix_ = std::move(matrix);
     s_.sparse_cpu_active = true;
 
     if (params_.verbose) {
         const double sparse_mib =
-            (sparse_cpu_matrix_->nonzeros * (sizeof(double) + sizeof(sparse_index)) +
+            (matrix_->sparse_cpu_matrix_->nonzeros * (sizeof(double) + sizeof(sparse_index)) +
              (static_cast<int64_t>(s_.m) + 1) * sizeof(sparse_index)) /
             (1024.0 * 1024.0);
         printf("  sparse CPU Accelerate FP64 SpMV enabled (approximately %.2f MiB)\n",
@@ -1283,7 +1319,7 @@ std::vector<mx::array> MlxPdlpSolver::fused_primal_step(
             "at_row_starts", "at_col_ind", "at_values", "at_work_offsets",
             "at_work_rows", "y_cur", SparseMetalSpmvStrategy::scalar_rows);
         kernels = &variants;
-        inputs = {sparse_at_row_ptr_, sparse_at_col_ind_, sparse_at_values_,
+        inputs = {matrix_->sparse_at_row_ptr_, matrix_->sparse_at_col_ind_, matrix_->sparse_at_values_,
                   s_.y_cur, s_.x_cur, s_.x_init, s_.obj, s_.var_lb,
                   s_.var_ub, scalars};
         grid_size = s_.n;
@@ -1305,7 +1341,7 @@ std::vector<mx::array> MlxPdlpSolver::fused_primal_step(
             "at_work_rows", "y_cur", SparseMetalSpmvStrategy::quad_rows);
         const bool quad = s_.sparse_at_spmv_strategy == SparseMetalSpmvStrategy::quad_rows;
         kernels = quad ? &quad_variants : &variants;
-        inputs = {sparse_at_row_ptr_, sparse_at_col_ind_, sparse_at_values_,
+        inputs = {matrix_->sparse_at_row_ptr_, matrix_->sparse_at_col_ind_, matrix_->sparse_at_values_,
                   s_.y_cur, s_.x_cur, s_.x_init, s_.obj, s_.var_lb,
                   s_.var_ub, scalars};
         grid_size = s_.n * (quad ? 4 : 32);
@@ -1320,10 +1356,10 @@ std::vector<mx::array> MlxPdlpSolver::fused_primal_step(
             "at_row_starts", "at_col_ind", "at_values", "at_work_offsets",
             "at_work_rows", "y_cur", SparseMetalSpmvStrategy::adaptive);
         kernels = &variants;
-        inputs = {sparse_at_row_ptr_, sparse_at_col_ind_, sparse_at_values_,
-                  sparse_at_work_offsets_, sparse_at_work_rows_, s_.y_cur,
+        inputs = {matrix_->sparse_at_row_ptr_, matrix_->sparse_at_col_ind_, matrix_->sparse_at_values_,
+                  matrix_->sparse_at_work_offsets_, matrix_->sparse_at_work_rows_, s_.y_cur,
                   s_.x_cur, s_.x_init, s_.obj, s_.var_lb, s_.var_ub, scalars};
-        grid_size = sparse_at_work_item_count_ * threadgroup_width;
+        grid_size = matrix_->sparse_at_work_item_count_ * threadgroup_width;
         break;
     }
     }
@@ -1360,7 +1396,7 @@ std::vector<mx::array> MlxPdlpSolver::fused_dual_step(
             "a_row_starts", "a_col_ind", "a_values", "a_work_offsets",
             "a_work_rows", "x_ref", SparseMetalSpmvStrategy::scalar_rows);
         kernels = &variants;
-        inputs = {sparse_a_row_ptr_, sparse_a_col_ind_, sparse_a_values_, s_.x_ref,
+        inputs = {matrix_->sparse_a_row_ptr_, matrix_->sparse_a_col_ind_, matrix_->sparse_a_values_, s_.x_ref,
                   s_.y_cur, s_.y_init, s_.con_lb, s_.con_ub, scalars};
         grid_size = s_.m;
         break;
@@ -1381,7 +1417,7 @@ std::vector<mx::array> MlxPdlpSolver::fused_dual_step(
             "a_work_rows", "x_ref", SparseMetalSpmvStrategy::quad_rows);
         const bool quad = s_.sparse_a_spmv_strategy == SparseMetalSpmvStrategy::quad_rows;
         kernels = quad ? &quad_variants : &variants;
-        inputs = {sparse_a_row_ptr_, sparse_a_col_ind_, sparse_a_values_, s_.x_ref,
+        inputs = {matrix_->sparse_a_row_ptr_, matrix_->sparse_a_col_ind_, matrix_->sparse_a_values_, s_.x_ref,
                   s_.y_cur, s_.y_init, s_.con_lb, s_.con_ub, scalars};
         grid_size = s_.m * (quad ? 4 : 32);
         break;
@@ -1395,10 +1431,10 @@ std::vector<mx::array> MlxPdlpSolver::fused_dual_step(
             "a_row_starts", "a_col_ind", "a_values", "a_work_offsets",
             "a_work_rows", "x_ref", SparseMetalSpmvStrategy::adaptive);
         kernels = &variants;
-        inputs = {sparse_a_row_ptr_, sparse_a_col_ind_, sparse_a_values_,
-                  sparse_a_work_offsets_, sparse_a_work_rows_, s_.x_ref,
+        inputs = {matrix_->sparse_a_row_ptr_, matrix_->sparse_a_col_ind_, matrix_->sparse_a_values_,
+                  matrix_->sparse_a_work_offsets_, matrix_->sparse_a_work_rows_, s_.x_ref,
                   s_.y_cur, s_.y_init, s_.con_lb, s_.con_ub, scalars};
-        grid_size = sparse_a_work_item_count_ * threadgroup_width;
+        grid_size = matrix_->sparse_a_work_item_count_ * threadgroup_width;
         break;
     }
     }
@@ -1439,12 +1475,12 @@ int MlxPdlpSolver::fused_eval_batch_size() const {
 mx::array MlxPdlpSolver::sparse_cpu_matvec(const mx::array &x, bool transpose,
                                            int rows) {
 #ifdef MLXPDLP_HAS_ACCELERATE_SPARSE
-    if (!sparse_cpu_matrix_) {
+    if (!matrix_->sparse_cpu_matrix_) {
         throw std::logic_error("sparse CPU matrix is not prepared");
     }
     auto input = mx::contiguous(x, false, s_.stream);
     auto primitive = std::make_shared<CpuSparseMatvecPrimitive>(
-        s_.stream, sparse_cpu_matrix_, transpose ? CblasTrans : CblasNoTrans, rows);
+        s_.stream, matrix_->sparse_cpu_matrix_, transpose ? CblasTrans : CblasNoTrans, rows);
     return mx::array(mx::Shape{rows}, mx::float64, std::move(primitive),
                      std::vector<mx::array>{std::move(input)});
 #else
@@ -1457,9 +1493,9 @@ mx::array MlxPdlpSolver::sparse_cpu_matvec(const mx::array &x, bool transpose,
 
 mx::array MlxPdlpSolver::mat_Ax(const mx::array &x) {
     if (s_.sparse_metal_active) {
-        return sparse_matvec(sparse_a_row_ptr_, sparse_a_col_ind_, sparse_a_values_,
-                             sparse_a_work_offsets_, sparse_a_work_rows_, x, s_.m,
-                             sparse_a_work_item_count_, s_.sparse_a_spmv_strategy);
+        return sparse_matvec(matrix_->sparse_a_row_ptr_, matrix_->sparse_a_col_ind_, matrix_->sparse_a_values_,
+                             matrix_->sparse_a_work_offsets_, matrix_->sparse_a_work_rows_, x, s_.m,
+                             matrix_->sparse_a_work_item_count_, s_.sparse_a_spmv_strategy);
     }
     if (s_.sparse_cpu_active) {
         return sparse_cpu_matvec(x, false, s_.m);
@@ -1474,9 +1510,9 @@ mx::array MlxPdlpSolver::mat_Ax(const mx::array &x) {
 
 mx::array MlxPdlpSolver::mat_ATx(const mx::array &y) {
     if (s_.sparse_metal_active) {
-        return sparse_matvec(sparse_at_row_ptr_, sparse_at_col_ind_, sparse_at_values_,
-                             sparse_at_work_offsets_, sparse_at_work_rows_, y, s_.n,
-                             sparse_at_work_item_count_, s_.sparse_at_spmv_strategy);
+        return sparse_matvec(matrix_->sparse_at_row_ptr_, matrix_->sparse_at_col_ind_, matrix_->sparse_at_values_,
+                             matrix_->sparse_at_work_offsets_, matrix_->sparse_at_work_rows_, y, s_.n,
+                             matrix_->sparse_at_work_item_count_, s_.sparse_at_spmv_strategy);
     }
     if (s_.sparse_cpu_active) {
         return sparse_cpu_matvec(y, true, s_.n);
@@ -1536,7 +1572,7 @@ void MlxPdlpSolver::apply_sparse_scaling(const std::vector<double> &con_scale,
             throw std::runtime_error("invalid constraint scaling for sparse Metal matrix");
         }
         inv_con_scale[static_cast<size_t>(row)] = 1.0 / scale;
-        sparse_con_rescale_host_[static_cast<size_t>(row)] *= scale;
+        matrix_->sparse_con_rescale_host_[static_cast<size_t>(row)] *= scale;
     }
     for (int col = 0; col < s_.n; ++col) {
         double scale = var_scale[static_cast<size_t>(col)];
@@ -1544,15 +1580,15 @@ void MlxPdlpSolver::apply_sparse_scaling(const std::vector<double> &con_scale,
             throw std::runtime_error("invalid variable scaling for sparse Metal matrix");
         }
         inv_var_scale[static_cast<size_t>(col)] = 1.0 / scale;
-        sparse_var_rescale_host_[static_cast<size_t>(col)] *= scale;
+        matrix_->sparse_var_rescale_host_[static_cast<size_t>(col)] *= scale;
     }
 
     for (int row = 0; row < s_.m; ++row) {
         double row_multiplier = inv_con_scale[static_cast<size_t>(row)];
-        for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
-             k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
-            int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
-            sparse_a_values_host_[static_cast<size_t>(k)] *=
+        for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+             k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+            int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
+            matrix_->sparse_a_values_host_[static_cast<size_t>(k)] *=
                 row_multiplier * inv_var_scale[static_cast<size_t>(col)];
         }
     }
@@ -1579,9 +1615,9 @@ void MlxPdlpSolver::apply_sparse_scaling(const std::vector<double> &con_scale,
 
 void MlxPdlpSolver::publish_sparse_rescaling() {
     s_.con_rescale = mlx_array_from_doubles(
-        sparse_con_rescale_host_.data(), s_.m, s_.obj.dtype());
+        matrix_->sparse_con_rescale_host_.data(), s_.m, s_.obj.dtype());
     s_.var_rescale = mlx_array_from_doubles(
-        sparse_var_rescale_host_.data(), s_.n, s_.obj.dtype());
+        matrix_->sparse_var_rescale_host_.data(), s_.n, s_.obj.dtype());
     mx::eval(s_.con_rescale, s_.var_rescale);
 }
 
@@ -1608,10 +1644,10 @@ void MlxPdlpSolver::mlx_geometric_mean_scaling(int num_iters) {
         std::fill(row_min.begin(), row_min.end(), infinity);
         std::fill(row_max.begin(), row_max.end(), 0.0);
         for (int row = 0; row < s_.m; ++row) {
-            for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
-                 k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
-                const int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
-                const double scaled = std::abs(sparse_a_values_host_[static_cast<size_t>(k)]) *
+            for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+                 k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+                const int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
+                const double scaled = std::abs(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]) *
                                       col_multiplier[static_cast<size_t>(col)];
                 if (!(scaled > 0.0) || !std::isfinite(scaled))
                     continue;
@@ -1631,10 +1667,10 @@ void MlxPdlpSolver::mlx_geometric_mean_scaling(int num_iters) {
         std::fill(col_min.begin(), col_min.end(), infinity);
         std::fill(col_max.begin(), col_max.end(), 0.0);
         for (int row = 0; row < s_.m; ++row) {
-            for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
-                 k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
-                const int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
-                const double scaled = std::abs(sparse_a_values_host_[static_cast<size_t>(k)]) *
+            for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+                 k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+                const int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
+                const double scaled = std::abs(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]) *
                                       row_multiplier[static_cast<size_t>(row)];
                 if (!(scaled > 0.0) || !std::isfinite(scaled))
                     continue;
@@ -1698,15 +1734,15 @@ void MlxPdlpSolver::mlx_curtis_reid_scaling(int num_iters) {
     std::vector<int> col_count(static_cast<size_t>(s_.n), 0);
 
     for (int row = 0; row < s_.m; ++row) {
-        for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
-             k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+        for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+             k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
             const double magnitude =
-                std::abs(static_cast<double>(sparse_a_values_host_[static_cast<size_t>(k)]));
+                std::abs(static_cast<double>(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]));
             if (!(magnitude > 0.0) || !std::isfinite(magnitude))
                 continue;
             ++row_count[static_cast<size_t>(row)];
             ++col_count[static_cast<size_t>(
-                sparse_a_col_ind_host_[static_cast<size_t>(k)])];
+                matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)])];
         }
     }
 
@@ -1717,13 +1753,13 @@ void MlxPdlpSolver::mlx_curtis_reid_scaling(int num_iters) {
     for (int iter = 0; iter < num_iters; ++iter) {
         std::fill(row_sum.begin(), row_sum.end(), 0.0);
         for (int row = 0; row < s_.m; ++row) {
-            for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
-                 k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+            for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+                 k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
                 const double magnitude =
-                    std::abs(static_cast<double>(sparse_a_values_host_[static_cast<size_t>(k)]));
+                    std::abs(static_cast<double>(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]));
                 if (!(magnitude > 0.0) || !std::isfinite(magnitude))
                     continue;
-                const int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
+                const int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
                 row_sum[static_cast<size_t>(row)] +=
                     -std::log(magnitude) - col_log_scale[static_cast<size_t>(col)];
             }
@@ -1736,13 +1772,13 @@ void MlxPdlpSolver::mlx_curtis_reid_scaling(int num_iters) {
 
         std::fill(col_sum.begin(), col_sum.end(), 0.0);
         for (int row = 0; row < s_.m; ++row) {
-            for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
-                 k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+            for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+                 k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
                 const double magnitude =
-                    std::abs(static_cast<double>(sparse_a_values_host_[static_cast<size_t>(k)]));
+                    std::abs(static_cast<double>(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]));
                 if (!(magnitude > 0.0) || !std::isfinite(magnitude))
                     continue;
-                const int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
+                const int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
                 col_sum[static_cast<size_t>(col)] +=
                     -std::log(magnitude) - row_log_scale[static_cast<size_t>(row)];
             }
@@ -1815,15 +1851,15 @@ void MlxPdlpSolver::sparse_ruiz_scaling(int num_iters) {
         // the same matrix state, then row and column scaling are applied
         // together. Duplicate coordinates contribute as distinct CSR entries.
         for (int row = 0; row < s_.m; ++row) {
-            for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
-                 k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
-                double magnitude = std::abs(sparse_a_values_host_[static_cast<size_t>(k)]);
+            for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+                 k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+                double magnitude = std::abs(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]);
                 if (!std::isfinite(magnitude)) {
                     continue;
                 }
                 row_absmax[static_cast<size_t>(row)] =
                     std::max(row_absmax[static_cast<size_t>(row)], magnitude);
-                int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
+                int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
                 col_absmax[static_cast<size_t>(col)] =
                     std::max(col_absmax[static_cast<size_t>(col)], magnitude);
             }
@@ -1852,15 +1888,15 @@ void MlxPdlpSolver::sparse_pock_chambolle_scaling(double alpha) {
     std::vector<double> var_scale(static_cast<size_t>(s_.n), 1.0);
 
     for (int row = 0; row < s_.m; ++row) {
-        for (int32_t k = sparse_a_row_ptr_host_[static_cast<size_t>(row)];
-             k < sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
+        for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
+             k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
             double magnitude =
-                std::abs(static_cast<double>(sparse_a_values_host_[static_cast<size_t>(k)]));
+                std::abs(static_cast<double>(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]));
             if (!std::isfinite(magnitude)) {
                 continue;
             }
             row_powsum[static_cast<size_t>(row)] += std::pow(magnitude, alpha);
-            int col = sparse_a_col_ind_host_[static_cast<size_t>(k)];
+            int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
             col_powsum[static_cast<size_t>(col)] += std::pow(magnitude, 2.0 - alpha);
         }
     }
@@ -2065,12 +2101,12 @@ double MlxPdlpSolver::mlx_operator_norm_upper_bound() {
     if (s_.sparse_cpu_active || s_.sparse_metal_active) {
         for (int row = 0; row < s_.m; ++row) {
             long double sum = 0.0L;
-            for (int entry = sparse_a_row_ptr_host_[row]; entry < sparse_a_row_ptr_host_[row + 1];
+            for (int entry = matrix_->sparse_a_row_ptr_host_[row]; entry < matrix_->sparse_a_row_ptr_host_[row + 1];
                  ++entry) {
-                double value = sparse_a_values_host_[entry];
+                double value = matrix_->sparse_a_values_host_[entry];
                 if (s_.sparse_metal_active)
                     value = static_cast<float>(value);
-                add(sparse_a_col_ind_host_[entry], value, sum);
+                add(matrix_->sparse_a_col_ind_host_[entry], value, sum);
             }
             max_row_sum = std::max(max_row_sum, sum);
         }
@@ -2126,7 +2162,7 @@ double MlxPdlpSolver::mlx_estimate_max_singular_value() {
     auto eigen = mlx_array_from_doubles(eigen_host.data(), m, s_.obj.dtype());
     auto compute_frobenius_norm = [this]() {
         if (s_.sparse_metal_active || s_.sparse_cpu_active) {
-            return sparse_frobenius_norm_;
+            return matrix_->sparse_frobenius_norm_;
         }
         auto flat_A = mx::reshape(s_.A, {s_.m * s_.n});
         return mlx_norm2(flat_A);
@@ -2375,6 +2411,11 @@ void MlxPdlpSolver::mlx_compute_fixed_point_error() {
     const double dual_norm = mlx_scalar_as_double(dual_norm_value);
     const double cross_term = mlx_scalar_as_double(cross_term_value);
 
+    publish_fixed_point_metrics(primal_norm, dual_norm, cross_term);
+}
+
+void MlxPdlpSolver::publish_fixed_point_metrics(double primal_norm, double dual_norm,
+                                               double cross_term) {
     // movement = primal_norm² * primal_weight + dual_norm² / primal_weight
     double movement =
         primal_norm * primal_norm * s_.primal_weight + dual_norm * dual_norm / s_.primal_weight;
@@ -2390,11 +2431,17 @@ void MlxPdlpSolver::mlx_compute_fixed_point_error() {
 }
 
 void MlxPdlpSolver::mlx_compute_residual() {
-    // Recompute Ax = A * x_pdhg for residual computation
     s_.Ax = mat_Ax(s_.x_pdhg);
-    // Recompute ATy = A^T * y_pdhg
     s_.ATy = mat_ATx(s_.y_pdhg);
+    auto metrics = build_residual_metrics();
+    mx::eval(metrics);
+    double values[6];
+    for (int i = 0; i < 6; ++i)
+        values[i] = metrics.dtype() == mx::float64 ? metrics.data<double>()[i] : metrics.data<float>()[i];
+    publish_residual_metrics(values);
+}
 
+mx::array MlxPdlpSolver::build_residual_metrics() {
     // primal_residual = Ax - clip(Ax, con_lb, con_ub)
     auto clamped_ax = mx::clip(s_.Ax, s_.con_lb, s_.con_ub);
     s_.primal_res = s_.Ax - clamped_ax;
@@ -2442,20 +2489,18 @@ void MlxPdlpSolver::mlx_compute_residual() {
         restart_dual_res * s_.var_rescale / obj_vec_rescale;
     auto primal_residual_norm_value =
         params_.optimality_norm == NORM_TYPE_L_INF
-            ? mx::max(mx::abs(primal_res_original))
+            ? (s_.m ? mx::max(mx::abs(primal_res_original)) : mx::array(0.0, s_.obj.dtype()))
             : mx::linalg::norm(primal_res_original);
     auto dual_residual_norm_value =
         params_.optimality_norm == NORM_TYPE_L_INF
-            ? mx::max(mx::abs(dual_res_original))
+            ? (s_.n ? mx::max(mx::abs(dual_res_original)) : mx::array(0.0, s_.obj.dtype()))
             : mx::linalg::norm(dual_res_original);
     auto restart_dual_residual_norm_value =
         params_.optimality_norm == NORM_TYPE_L_INF
-            ? mx::max(mx::abs(restart_dual_res_original))
+            ? (s_.n ? mx::max(mx::abs(restart_dual_res_original)) : mx::array(0.0, s_.obj.dtype()))
             : mx::linalg::norm(restart_dual_res_original);
 
     // Relative residuals (CUDA reference: divide by 1.0 + norm)
-    double obj_norm = s_.objective_vector_norm;
-    double con_norm = s_.constraint_bound_norm;
     // Objective values (CUDA reference: divide by rescaling factors)
     auto primal_obj_value = mx::sum(s_.obj * s_.x_pdhg);
 
@@ -2478,29 +2523,29 @@ void MlxPdlpSolver::mlx_compute_residual() {
                                       var_ub_safe * reduced_cost);
     auto dual_var_obj_value = mx::sum(dual_var_contrib);
 
-    // All block-level residual and objective reductions share one evaluation.
-    // Reading the already-materialized scalars below does not trigger further
-    // device synchronization.
-    mx::eval(primal_residual_norm_value, dual_residual_norm_value,
-             restart_dual_residual_norm_value, primal_obj_value,
-             dual_obj_bnd_value, dual_var_obj_value);
+    return mx::stack({primal_residual_norm_value, dual_residual_norm_value, restart_dual_residual_norm_value, primal_obj_value, dual_obj_bnd_value, dual_var_obj_value});
+}
+
+void MlxPdlpSolver::publish_residual_metrics(const double *values) {
+    const double obj_norm = s_.objective_vector_norm;
+    const double con_norm = s_.constraint_bound_norm;
     s_.absolute_primal_residual =
-        mlx_scalar_as_double(primal_residual_norm_value);
+        values[0];
     s_.absolute_dual_residual =
-        mlx_scalar_as_double(dual_residual_norm_value);
+        values[1];
     s_.relative_primal_residual = s_.absolute_primal_residual / (1.0 + con_norm);
     restart_relative_primal_residual_ = s_.relative_primal_residual;
     s_.relative_dual_residual = s_.absolute_dual_residual / (1.0 + obj_norm);
     const double restart_absolute_dual_residual =
-        mlx_scalar_as_double(restart_dual_residual_norm_value);
+        values[2];
     s_.restart_relative_dual_residual =
         restart_absolute_dual_residual / (1.0 + obj_norm);
 
-    double primal_obj = mlx_scalar_as_double(primal_obj_value);
+    double primal_obj = values[3];
     primal_obj = primal_obj / (s_.con_bound_rescale * s_.obj_vec_rescale) +
                  s_.objective_constant;
-    const double dual_obj_bnd = mlx_scalar_as_double(dual_obj_bnd_value);
-    const double dual_var_obj = mlx_scalar_as_double(dual_var_obj_value);
+    const double dual_obj_bnd = values[4];
+    const double dual_var_obj = values[5];
     double dual_obj =
         (dual_obj_bnd + dual_var_obj) / (s_.con_bound_rescale * s_.obj_vec_rescale) +
         s_.objective_constant;
@@ -2513,6 +2558,7 @@ void MlxPdlpSolver::mlx_compute_residual() {
 }
 
 bool MlxPdlpSolver::mlx_recover_numerical_failure() {
+    infeasibility_metrics_ready_ = false;
     // A recovery changes the operator: restart all Halpern and controller
     // state together from a complete, evaluated x/y/z checkpoint.
     if (s_.best_iteration < 0 || s_.step_size_reductions >= 8)
@@ -3119,20 +3165,21 @@ void MlxPdlpSolver::mlx_dual_feasibility_polish() {
 
 void MlxPdlpSolver::mlx_compute_infeasibility_information() {
     ++s_.infeasibility_check_count;
-
-    // Without constraints there can be no primal-infeasibility certificate and
-    // without variables no dual-infeasibility certificate; the rays also
-    // degenerate to empty arrays that MLX reductions reject.
-    if (s_.m == 0 || s_.n == 0) {
-        working_dual_ray_objective_ = 0.0;
-        working_primal_ray_objective_ = 0.0;
-        s_.max_primal_ray_infeasibility = 0.0;
-        s_.max_dual_ray_infeasibility = 0.0;
-        s_.primal_ray_linear_objective = 0.0;
-        s_.dual_ray_objective = 0.0;
+    if (infeasibility_metrics_ready_) {
+        infeasibility_metrics_ready_ = false;
         return;
     }
+    auto metrics = build_infeasibility_metrics();
+    mx::eval(metrics);
+    double values[6];
+    for (int i=0;i<6;++i)
+        values[i] = metrics.dtype() == mx::float64 ? metrics.data<double>()[i] : metrics.data<float>()[i];
+    publish_infeasibility_metrics(values);
+}
 
+mx::array MlxPdlpSolver::build_infeasibility_metrics(const mx::array *primal_product,
+                                                   const mx::array *dual_product) {
+    if (s_.m == 0 || s_.n == 0) return mx::zeros({6}, s_.obj.dtype());
     // Infeasibility certificates via Farkas separation on the box-constrained
     // formulation, computed on the sign-projected fixed-point deltas. The
     // residual measures recession-cone membership, and the objective is the
@@ -3150,7 +3197,7 @@ void MlxPdlpSolver::mlx_compute_infeasibility_information() {
         mx::where(primal_ray_inf_norm_value > 0.0, primal_ray_inf_norm_value,
                   mx::ones_like(primal_ray_inf_norm_value));
     auto primal_ray = s_.delta_x / primal_ray_denominator;
-    auto A_pr = mat_Ax(primal_ray);
+    auto A_pr = primal_product ? *primal_product : mat_Ax(primal_ray);
     auto primal_ray_objective_value = mx::sum(s_.obj * primal_ray);
 
     auto var_upper_only = s_.var_ub_inf_mask * (1.0 - s_.var_lb_inf_mask);
@@ -3183,7 +3230,7 @@ void MlxPdlpSolver::mlx_compute_infeasibility_information() {
         mx::where(dual_ray_inf_norm_value > 0.0, dual_ray_inf_norm_value,
                   mx::ones_like(dual_ray_inf_norm_value));
     auto dual_ray = s_.delta_y / dual_ray_denominator;
-    auto AT_dr = mat_ATx(dual_ray);
+    auto AT_dr = dual_product ? *dual_product : mat_ATx(dual_ray);
 
     auto y_con_viol = mx::maximum(dual_ray, mx::zeros_like(dual_ray)) * s_.con_lb_inf_mask +
                       mx::maximum(-dual_ray, mx::zeros_like(dual_ray)) * s_.con_ub_inf_mask;
@@ -3206,23 +3253,21 @@ void MlxPdlpSolver::mlx_compute_infeasibility_information() {
                  mx::minimum(AT_dr, mx::zeros_like(AT_dr)) * var_lb_safe;
     auto dual_ray_objective_value = mx::sum(min_s) - mx::sum(max_x);
 
-    // Materialize both rays, both sparse matvecs, and every certificate
-    // reduction together. Reading the six scalar results below then costs
-    // one device synchronization instead of a sequence of round trips.
-    mx::eval(primal_ray_objective_value, r_var_viol_norm_value,
-             r_con_viol_norm_value, y_con_viol_norm_value,
-             y_var_viol_norm_value, dual_ray_objective_value);
+    return mx::stack({primal_ray_objective_value, r_var_viol_norm_value, r_con_viol_norm_value, y_con_viol_norm_value, y_var_viol_norm_value, dual_ray_objective_value});
+}
+
+void MlxPdlpSolver::publish_infeasibility_metrics(const double *values) {
     working_primal_ray_objective_ =
-        mlx_scalar_as_double(primal_ray_objective_value);
+        values[0];
     s_.primal_ray_linear_objective =
         working_primal_ray_objective_ / (s_.con_bound_rescale * s_.obj_vec_rescale);
     s_.max_primal_ray_infeasibility =
-        std::max(mlx_scalar_as_double(r_var_viol_norm_value),
-                 mlx_scalar_as_double(r_con_viol_norm_value));
+        std::max(values[1],
+                 values[2]);
     s_.max_dual_ray_infeasibility =
-        std::max(mlx_scalar_as_double(y_con_viol_norm_value),
-                 mlx_scalar_as_double(y_var_viol_norm_value));
-    working_dual_ray_objective_ = mlx_scalar_as_double(dual_ray_objective_value);
+        std::max(values[3],
+                 values[4]);
+    working_dual_ray_objective_ = values[5];
     s_.dual_ray_objective =
         working_dual_ray_objective_ / (s_.con_bound_rescale * s_.obj_vec_rescale);
 }
@@ -3241,6 +3286,10 @@ void MlxPdlpSolver::mlx_perform_restart() {
     const double primal_dist = mlx_scalar_as_double(primal_dist_value);
     const double dual_dist = mlx_scalar_as_double(dual_dist_value);
 
+    mlx_perform_restart(primal_dist, dual_dist);
+}
+
+void MlxPdlpSolver::mlx_perform_restart(double primal_dist, double dual_dist) {
     double ratio_infeas = s_.restart_relative_dual_residual / restart_relative_primal_residual_;
     const double old_primal_weight = s_.primal_weight;
 
@@ -3606,10 +3655,10 @@ double MlxPdlpSolver::recompute_original_certificate(mlxpdlp_result_t *result, b
     const auto &model_num_constraints =
         working_model ? working_num_constraints_ : original_num_constraints_;
     const auto &model_num_nonzeros = working_model ? working_num_nonzeros_ : original_num_nonzeros_;
-    const auto &model_row_ptr = working_model ? working_row_ptr_ : original_row_ptr_;
-    const auto &model_col_ind = working_model ? working_col_ind_ : original_col_ind_;
+    const auto &model_row_ptr = working_model ? matrix_->working_row_ptr_ : matrix_->original_row_ptr_;
+    const auto &model_col_ind = working_model ? matrix_->working_col_ind_ : matrix_->original_col_ind_;
     const auto &model_matrix_values =
-        working_model ? working_matrix_values_ : original_matrix_values_;
+        working_model ? matrix_->working_matrix_values_ : matrix_->original_matrix_values_;
     const auto &model_objective = working_model ? working_objective_ : original_objective_;
     const auto &model_variable_lower_bound =
         working_model ? working_variable_lower_bound_ : original_variable_lower_bound_;
@@ -3880,8 +3929,8 @@ void MlxPdlpSolver::copy_unscaled_certificate(double *x, double *y, double *z) {
     if (solution_variable_scale_.size() != static_cast<size_t>(s_.n) ||
         solution_constraint_scale_.size() != static_cast<size_t>(s_.m)) {
         if (s_.sparse_metal_active || s_.sparse_cpu_active) {
-            solution_variable_scale_ = sparse_var_rescale_host_;
-            solution_constraint_scale_ = sparse_con_rescale_host_;
+            solution_variable_scale_ = matrix_->sparse_var_rescale_host_;
+            solution_constraint_scale_ = matrix_->sparse_con_rescale_host_;
         } else {
             solution_variable_scale_.resize(static_cast<size_t>(s_.n));
             solution_constraint_scale_.resize(static_cast<size_t>(s_.m));
@@ -4039,12 +4088,12 @@ void MlxPdlpSolver::apply_postsolve(mlxpdlp_result_t *result) {
                                           0.0L);
     for (int row = 0; row < working_num_constraints_; ++row) {
         const long double dual = result->dual_solution[row];
-        for (int entry = working_row_ptr_[static_cast<size_t>(row)];
-             entry < working_row_ptr_[static_cast<size_t>(row + 1)]; ++entry) {
-            const int column = working_col_ind_[static_cast<size_t>(entry)];
+        for (int entry = matrix_->working_row_ptr_[static_cast<size_t>(row)];
+             entry < matrix_->working_row_ptr_[static_cast<size_t>(row + 1)]; ++entry) {
+            const int column = matrix_->working_col_ind_[static_cast<size_t>(entry)];
             reduced_at_y[static_cast<size_t>(column)] +=
                 static_cast<long double>(
-                    working_matrix_values_[static_cast<size_t>(entry)]) *
+                    matrix_->working_matrix_values_[static_cast<size_t>(entry)]) *
                 dual;
         }
     }
@@ -4225,21 +4274,7 @@ mlxpdlp_result_t *MlxPdlpSolver::extract_presolve_result() {
 // Main solve() — the full PDHG algorithm
 // ---------------------------------------------------------------------------
 
-mlxpdlp_result_t *MlxPdlpSolver::solve() {
-    if (solve_called_) {
-        throw std::logic_error(
-            "MlxPdlpSolver::solve() may only be called once; construct a new solver instance");
-    }
-    solve_called_ = true;
-
-    // Every MLX operation in the solve path omits an explicit stream, so scope
-    // MLX's defaults to the stream selected in the constructor.
-    mx::StreamContext stream_context(s_.stream);
-    s_.start_time = SteadyClock::now();
-
-    if (presolve_solved_)
-        return extract_presolve_result();
-
+void MlxPdlpSolver::initialize_solve() {
     // ---- Phase 1: Preconditioning ----
     const auto rescale_start = SteadyClock::now();
 
@@ -4257,6 +4292,17 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
     // denominator, so replacing zero by one halves the residual and also changes
     // the adaptive primal-weight trajectory on homogeneous models.
 
+    if (prepared_matrix_) {
+        s_.var_rescale = prepared_matrix_->s_.var_rescale;
+        s_.con_rescale = prepared_matrix_->s_.con_rescale;
+        s_.obj = s_.obj / s_.var_rescale;
+        s_.var_lb = s_.var_lb * s_.var_rescale;
+        s_.var_ub = s_.var_ub * s_.var_rescale;
+        s_.con_lb = s_.con_lb / s_.con_rescale;
+        s_.con_ub = s_.con_ub / s_.con_rescale;
+        s_.x_cur = s_.x_cur * s_.var_rescale;
+        s_.y_cur = s_.y_cur * s_.con_rescale;
+    } else {
     // Apply preconditioning (geometric mean, optional Curtis-Reid, then Ruiz,
     // Pock-Chambolle, and bound-objective scaling).
     if (params_.geometric_mean_iterations > 0 && s_.nnz > 0) {
@@ -4301,6 +4347,7 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
     if (params_.has_pock_chambolle_alpha) {
         mlx_pock_chambolle_scaling(params_.pock_chambolle_alpha);
     }
+    }
     if (params_.bound_objective_rescaling) {
         mlx_bound_objective_scaling();
     }
@@ -4320,7 +4367,10 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
     s_.rescaling_time_sec = elapsed_seconds(rescale_start);
 
     // ---- Phase 2: Step size initialization ----
-    if (s_.nnz > 0) {
+    if (prepared_matrix_) {
+        s_.step_size = prepared_matrix_->s_.step_size;
+        s_.operator_norm_upper_bound = prepared_matrix_->s_.operator_norm_upper_bound;
+    } else if (s_.nnz > 0) {
         double max_sv = params_.conservative_step_size ? mlx_operator_norm_upper_bound()
                                                        : mlx_estimate_max_singular_value();
         if (max_sv < 1e-14) {
@@ -4424,6 +4474,45 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
                s_.nnz > 0 ? 0.998 / s_.step_size : 0.0, s_.step_size, s_.primal_weight,
                s_.rescaling_time_sec);
     }
+
+}
+
+mlxpdlp_result_t *MlxPdlpSolver::finish_solve() {
+    // ---- Phase 4: Final residual computation ----
+    if (s_.termination_reason == TERMINATION_REASON_TIME_LIMIT ||
+        s_.termination_reason == TERMINATION_REASON_ITERATION_LIMIT ||
+        s_.termination_reason == TERMINATION_REASON_NUMERICAL_ERROR) {
+        mlx_restore_best_iterate();
+    }
+    mlx_compute_residual();
+    mlx_host_double_feedback(true, true);
+    mlx_primal_feasibility_polish();
+    mlx_dual_feasibility_polish();
+    mlx_host_double_feedback(true, true);
+    s_.cumulative_time_sec = elapsed_seconds(s_.start_time);
+
+    mlx_display_final_log();
+
+    // ---- Phase 5: Extract result ----
+    return extract_result();
+}
+
+mlxpdlp_result_t *MlxPdlpSolver::solve() {
+    if (solve_called_) {
+        throw std::logic_error(
+            "MlxPdlpSolver::solve() may only be called once; construct a new solver instance");
+    }
+    solve_called_ = true;
+
+    // Every MLX operation in the solve path omits an explicit stream, so scope
+    // MLX's defaults to the stream selected in the constructor.
+    mx::StreamContext stream_context(s_.stream);
+    s_.start_time = SteadyClock::now();
+
+    if (presolve_solved_)
+        return extract_presolve_result();
+
+    initialize_solve();
 
     // ---- Phase 3: Main PDHG loop ----
     mlx_display_header();
@@ -4576,23 +4665,7 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
         s_.termination_reason = TERMINATION_REASON_ITERATION_LIMIT;
     }
 
-    // ---- Phase 4: Final residual computation ----
-    if (s_.termination_reason == TERMINATION_REASON_TIME_LIMIT ||
-        s_.termination_reason == TERMINATION_REASON_ITERATION_LIMIT ||
-        s_.termination_reason == TERMINATION_REASON_NUMERICAL_ERROR) {
-        mlx_restore_best_iterate();
-    }
-    mlx_compute_residual();
-    mlx_host_double_feedback(true, true);
-    mlx_primal_feasibility_polish();
-    mlx_dual_feasibility_polish();
-    mlx_host_double_feedback(true, true);
-    s_.cumulative_time_sec = elapsed_seconds(s_.start_time);
-
-    mlx_display_final_log();
-
-    // ---- Phase 5: Extract result ----
-    return extract_result();
+    return finish_solve();
 }
 
 } // namespace mlxpdlp
