@@ -6,6 +6,7 @@
 #include "metal_minor_batch.h"
 #include "pdhg_control.h"
 #include <algorithm>
+#include <array>
 #include <climits>
 #include <mutex>
 #include <stdexcept>
@@ -133,6 +134,7 @@ struct BatchDriver {
     double preparation_sec;
     size_t matrix_bytes;
     int max_row_a = 0, max_row_at = 0;
+    std::array<std::optional<MetalSpmmRowSchedule>, 2> row_schedules_a, row_schedules_at;
 
     BatchDriver(int n_, int m_, const int *rp, const int *ci, const double *v,
                  const pdhg_parameters_t *p, mx::Device d) : n(n_), m(m_), nnz(0), device(d) {
@@ -166,6 +168,30 @@ struct BatchDriver {
         matrix_bytes = prepared->matrix_->resident_bytes() + prepared->s_.A.nbytes() + prepared->s_.AT.nbytes();
         // The preparation solver retains only O(n+m) scratch, counted here.
         matrix_bytes = checked_add(matrix_bytes, checked_mul(size_t(n) + m, 256));
+        if (prepared->s_.sparse_metal_active) {
+            auto prepare_rows = [&](const auto &row_ptr, auto &schedules) {
+                size_t short_rows = 0;
+                for (size_t r = 1; r < row_ptr.size(); ++r)
+                    short_rows += row_ptr[r] - row_ptr[r - 1] <= 16;
+                // Uniform orientations retain the direct mapping and need no
+                // row descriptors. Mixed orientations share immutable maps
+                // across every submitted member and every iteration block.
+                if (short_rows == 0 || short_rows + 1 == row_ptr.size()) return;
+                for (int i = 0; i < 2; ++i) {
+                    auto work = make_metal_spmm_row_work(row_ptr, i == 0 ? 4 : 8);
+                    // Only try descriptor loads when packing removes at least
+                    // half the thread slots of the full-SIMD row mapping.
+                    // Keep the direct kernel for a small short-row minority.
+                    if ((work.offsets.size() - 1) * 256 * 2 > (row_ptr.size() - 1) * 32) continue;
+                    schedules[i].emplace(work);
+                    const auto &s = *schedules[i];
+                    mx::eval(s.offsets, s.rows);
+                    matrix_bytes = checked_add(matrix_bytes, checked_add(s.offsets.nbytes(), s.rows.nbytes()));
+                }
+            };
+            prepare_rows(prepared->matrix_->sparse_a_row_ptr_host_, row_schedules_a);
+            prepare_rows(prepared->matrix_->sparse_at_row_ptr_host_, row_schedules_at);
+        }
         preparation_sec = seconds(start);
     }
 
@@ -183,25 +209,35 @@ struct BatchDriver {
         const int max_length = transpose ? max_row_at : max_row_a;
         return max_length <= 16 ? 1 : 32 / tile;
     }
-    mx::array product(const mx::array &v, const mx::array &active, bool transpose, int tile) {
+    const MetalSpmmRowSchedule *row_schedule(bool transpose, const BatchOptions &options) const {
+        if (!options.row_aware_scheduling) return nullptr;
+        const auto &schedule = (transpose ? row_schedules_at : row_schedules_a)[options.lp_tile_width == 4 ? 0 : 1];
+        return schedule ? &*schedule : nullptr;
+    }
+    mx::array product(const mx::array &v, const mx::array &active, bool transpose, const BatchOptions &options) {
+        const int tile = options.lp_tile_width;
         auto &a = *prepared->matrix_;
         return metal_spmm(transpose ? a.sparse_at_row_ptr_ : a.sparse_a_row_ptr_,
                           transpose ? a.sparse_at_col_ind_ : a.sparse_a_col_ind_,
                           transpose ? a.sparse_at_values_ : a.sparse_a_values_, v, active,
-                          transpose ? n : m, tile, reduction(transpose, tile), submission_stream);
+                          transpose ? n : m, tile, reduction(transpose, tile), submission_stream,
+                          row_schedule(transpose, options));
     }
-    void advance(Workspace &w, const mx::array &active, const mx::array &coeff, bool major, int tile) {
+    void advance(Workspace &w, const mx::array &active, const mx::array &coeff, bool major, const BatchOptions &options) {
+        const int tile = options.lp_tile_width;
         auto &a = *prepared->matrix_;
         std::vector<mx::array> input{a.sparse_at_row_ptr_, a.sparse_at_col_ind_, a.sparse_at_values_, w.y, active,
                                     w.x, w.xi, w.xr, w.vl, w.vu, w.obj, coeff};
         if (major) { input.push_back(w.xp); input.push_back(w.z); }
-        auto x = metal_spmm_dispatch(input, n, tile, reduction(true, tile), 1, major, submission_stream);
+        auto x = metal_spmm_dispatch(input, n, tile, reduction(true, tile), 1, major, submission_stream,
+                                    row_schedule(true, options));
         w.x = x[0]; w.xr = x[1];
         if (major) { w.xp = x[2]; w.z = x[3]; }
         input = {a.sparse_a_row_ptr_, a.sparse_a_col_ind_, a.sparse_a_values_, w.xr, active,
                  w.y, w.yi, w.yr, w.cl, w.cu, w.obj, coeff};
         if (major) input.push_back(w.yp);
-        auto y = metal_spmm_dispatch(input, m, tile, reduction(false, tile), 2, major, submission_stream);
+        auto y = metal_spmm_dispatch(input, m, tile, reduction(false, tile), 2, major, submission_stream,
+                                    row_schedule(false, options));
         w.y = y[0]; w.yr = y[1];
         if (major) w.yp = y[2];
     }
@@ -286,6 +322,7 @@ struct BatchDriver {
         const int count = static_cast<int>(solvers.size());
         const int width = ((count + options.lp_tile_width - 1) / options.lp_tile_width) * options.lp_tile_width;
         const int frequency = solvers[0]->params_.termination_evaluation_frequency;
+        const bool scheduled = row_schedule(false, options) || row_schedule(true, options);
         std::vector<int> active(width, 0), fresh(count, 0), conditional(count, 0);
         for (int j = 0; j < count; ++j) active[j] = 1;
         auto active_array = mx::array(active.data(), {width}, mx::int32);
@@ -346,7 +383,7 @@ struct BatchDriver {
                     const int count = std::min({distance-k, max_metal_batch_iterations,
                         options.iteration_batch_size-(k-1)%options.iteration_batch_size});
                     Workspace prototype = w;
-                    advance(prototype, active_array, mx::array(coeff.data(), {4,width}, mx::float32), false, options.lp_tile_width);
+                    advance(prototype, active_array, mx::array(coeff.data(), {4,width}, mx::float32), false, options);
                     std::vector<std::vector<float>> block;
                     for (int offset=0; offset<count; ++offset) block.push_back(coefficients(k+offset));
                     auto next = metal_spmm_minor_batch({prototype.x,prototype.xr}, {prototype.y,prototype.yr},
@@ -356,12 +393,13 @@ struct BatchDriver {
                     native = output.native_iteration_batching_active = true;
                 }
 #endif
-                if (!native) advance(w, active_array, mx::array(coeff.data(), {4, width}, mx::float32), major, options.lp_tile_width);
+                if (!native) advance(w, active_array, mx::array(coeff.data(), {4, width}, mx::float32), major, options);
+                output.row_aware_scheduling_active |= scheduled;
                 advanced = k;
                 if (baseline) {
                     auto dx = w.xr - w.xp;
                     auto dy = w.yr - w.yp;
-                    auto cross = product(dy, active_array, true, options.lp_tile_width);
+                    auto cross = product(dy, active_array, true, options);
                     auto metrics = mx::stack({mx::sqrt(mx::sum(mx::square(dx), 0)),
                                                mx::sqrt(mx::sum(mx::square(dy), 0)), mx::sum(cross * dx, 0)});
                     mx::eval(metrics, w.x, w.xr, w.xp, w.z, w.y, w.yr, w.yp);
@@ -383,16 +421,16 @@ struct BatchDriver {
             }
             output.pdhg_time_sec += seconds(iteration_start);
             const auto checkpoint = Clock::now();
-            auto ax = product(w.xp, active_array, false, options.lp_tile_width);
-            auto aty = product(w.yp, active_array, true, options.lp_tile_width);
+            auto ax = product(w.xp, active_array, false, options);
+            auto aty = product(w.yp, active_array, true, options);
             auto dx = w.xr - w.xp, dy = w.yr - w.yp;
-            auto cross = product(dy, active_array, true, options.lp_tile_width);
+            auto cross = product(dy, active_array, true, options);
             auto ray = [&](const mx::array &v) {
                 auto norm = v.shape(0) == 0 ? mx::zeros({width}, mx::float32) : mx::max(mx::abs(v), 0);
                 return v / mx::where(norm > 0, norm, mx::ones_like(norm));
             };
-            auto primal_ray_product = product(ray(dx), active_array, false, options.lp_tile_width);
-            auto dual_ray_product = product(ray(dy), active_array, true, options.lp_tile_width);
+            auto primal_ray_product = product(ray(dx), active_array, false, options);
+            auto dual_ray_product = product(ray(dy), active_array, true, options);
             auto fp = mx::stack({mx::sqrt(mx::sum(mx::square(dx), 0)), mx::sqrt(mx::sum(mx::square(dy), 0)),
                                  mx::sum(cross * dx, 0)});
             auto distances = mx::stack({mx::sqrt(mx::sum(mx::square(w.xp - w.xi), 0)),

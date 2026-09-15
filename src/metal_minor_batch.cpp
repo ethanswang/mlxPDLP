@@ -273,15 +273,17 @@ BatchKernel capture_spmm_batch_kernel(const batch_mx::array &output,
     const std::string suffix = primal ? "_1_minor" : "_2_minor";
     if (name.find("custom_kernel_mlxpdlp_spmm_") != 0 ||
         name.find(suffix + "_") == std::string::npos ||
-        source.size() != 12 || std::get<4>(state).size() != source.size() ||
+        (source.size() != 12 && source.size() != 14) || std::get<4>(state).size() != source.size() ||
         std::get<6>(state).has_value() || !std::get<7>(state).empty() || std::get<8>(state) || std::get<9>(state) != 0)
         throw std::logic_error("unsupported SpMM batch metadata: " + name +
                                " (inputs=" + std::to_string(source.size()) + ")");
     if (source[11].dtype() != batch_mx::float32 || source[11].ndim() != 2 || source[11].shape(0) != 4 ||
         source[11].shape(1) != output.shape(1) || std::get<4>(state)[11] != std::tuple{false,false,false})
         throw std::logic_error("unsupported SpMM coefficient metadata");
-    std::vector<int> map(12,-1);
-    for (int i=0;i<11;++i) if (i!=3 && i!=5) map[i]=batch_add_input(source[i],inputs);
+    std::vector<int> map(source.size(),-1);
+    // Coefficients remain at slot 11. Row schedules, when present, occupy
+    // slots 12/13 and are retained like the other immutable kernel inputs.
+    for (size_t i=0;i<source.size();++i) if (i!=3 && i!=5 && i!=11) map[i]=batch_add_input(source[i],inputs);
     return {std::move(state),std::move(map),3,5};
 }
 
@@ -322,7 +324,7 @@ class MetalSpmmMinorBatch final : public batch_mx::Primitive {
             encoder.set_compute_pipeline_state(kernel);
             int binding=0;
             const auto &info=std::get<4>(plan.state);
-            for (int i=0;i<12;++i) {
+            for (size_t i=0;i<plan.input_map.size();++i) {
                 if (i==11) {encoder.set_bytes(coeff.data(),coeff.size(),binding++);continue;}
                 const auto &input=i==3?vector:i==5?current:inputs[plan.input_map[i]];
                 encoder.set_input_array(input,binding++);

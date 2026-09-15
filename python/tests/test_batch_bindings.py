@@ -43,6 +43,42 @@ def test_widths_order_and_independent_certificates(device, width):
         assert np.linalg.norm(np.array([1., 2.]) - member.dual_solution[0] - member.reduced_cost) < 1e-3
 
 
+@pytest.mark.parametrize("tile", [4, 8])
+def test_row_scheduling_opt_in_and_disable_on_reused_plan(tile):
+    # Identity rows, 31 empty rows, then one long row: packing is useful.
+    n, rows, width = 33, 65, 3
+    shared = mlxpdlp.SharedMatrixPlan(n, rows,
+        np.r_[np.arange(n+1), np.full(31, n), 2*n].astype(np.int32),
+        np.tile(np.arange(n, dtype=np.int32), 2), np.ones(2*n),
+        parameters=parameters(), device="gpu")
+    args = dict(objective=np.ones((width, n)), variable_lower_bounds=np.zeros(n),
+                variable_upper_bounds=np.ones(n),
+                constraint_lower_bounds=np.r_[np.full(n, 0.25), np.zeros(31), n*0.25],
+                execution="shared", lp_tile_width=tile)
+    default = shared.solve_batch(**args)
+    enabled = shared.solve_batch(**args, row_aware_scheduling=True)
+    disabled = shared.solve_batch(**args, row_aware_scheduling=False)
+    again = shared.solve_batch(**args)
+    for batch, active in [(default, False), (enabled, True), (disabled, False), (again, False)]:
+        assert batch.row_aware_scheduling_active is active
+        for member in batch.results:
+            assert member.termination_reason_name == "OPTIMAL"
+            np.testing.assert_allclose(member.primal_solution, 0.25, atol=2e-3)
+            assert abs(member.primal_objective_value - n*0.25) < 2e-3
+    for batch in (disabled, again):
+        for before, after in zip(default.results, batch.results):
+            assert before.total_count == after.total_count
+            np.testing.assert_array_equal(before.primal_solution, after.primal_solution)
+
+    expired = shared.solve_batch(**args, row_aware_scheduling=True, time_sec_limit=0)
+    assert not expired.row_aware_scheduling_active
+    assert all(not member.has_solution for member in expired.results)
+    # Opting in preserves the guard for uniform short rows.
+    uniform = plan().solve_batch(**request(2), execution="shared", row_aware_scheduling=True)
+    assert not uniform.row_aware_scheduling_active
+    assert all(member.termination_reason_name == "OPTIMAL" for member in uniform.results)
+
+
 def test_ownership_permutation_repeated_submissions_and_partial_warm_starts():
     p = parameters()
     values = np.array([1., 1.])

@@ -10,7 +10,7 @@ struct PythonBatchResult {
     double construction_time_sec, initialization_time_sec;
     size_t estimated_peak_resident_bytes, groups, max_active_width;
     int lp_tile_width, iteration_batch_size;
-    bool native_iteration_batching_active;
+    bool native_iteration_batching_active, row_aware_scheduling_active;
 };
 static void bind_batch(nb::module_ &m) {
     nb::class_<PythonBatchResult>(m, "BatchResult")
@@ -30,7 +30,8 @@ static void bind_batch(nb::module_ &m) {
         .def_ro("max_active_width", &PythonBatchResult::max_active_width)
         .def_ro("lp_tile_width", &PythonBatchResult::lp_tile_width)
         .def_ro("iteration_batch_size", &PythonBatchResult::iteration_batch_size)
-        .def_ro("native_iteration_batching_active", &PythonBatchResult::native_iteration_batching_active);
+        .def_ro("native_iteration_batching_active", &PythonBatchResult::native_iteration_batching_active)
+        .def_ro("row_aware_scheduling_active", &PythonBatchResult::row_aware_scheduling_active);
     nb::class_<SharedMatrixPlan>(m, "SharedMatrixPlan")
         .def("__init__", [](SharedMatrixPlan *self, int n, int rows, const I32Arr &rp,
                             const I32Arr &ci, const F64Arr &values, pdhg_parameters_t *params,
@@ -56,7 +57,7 @@ static void bind_batch(nb::module_ &m) {
               const std::optional<std::vector<bool>> &pm, const std::optional<std::vector<bool>> &dm,
               const std::optional<std::vector<bool>> &zm, pdhg_parameters_t *parameters,
               const std::string &execution, double time_limit, size_t memory_budget,
-              int tile, int iterations) {
+              int tile, int iterations, bool row_aware_scheduling) {
             const auto entry = std::chrono::steady_clock::now();
             const size_t n = self.num_variables(), rows = self.num_constraints();
             if (objective.ndim() != 2 || objective.shape(1) != n)
@@ -106,6 +107,7 @@ static void bind_batch(nb::module_ &m) {
             options.time_sec_limit = std::max(0.0,time_limit-packing);
             options.resident_memory_budget_bytes = memory_budget;
             options.lp_tile_width = tile; options.iteration_batch_size = iterations;
+            options.row_aware_scheduling = row_aware_scheduling;
             std::optional<pdhg_parameters_t> settings;
             if (parameters) settings = *parameters;
             BatchResult batch;
@@ -138,6 +140,7 @@ static void bind_batch(nb::module_ &m) {
             out.groups = batch.groups; out.max_active_width = batch.max_active_width;
             out.lp_tile_width = batch.lp_tile_width; out.iteration_batch_size = batch.iteration_batch_size;
             out.native_iteration_batching_active = batch.native_iteration_batching_active;
+            out.row_aware_scheduling_active = batch.row_aware_scheduling_active;
             return out;
         }, nb::arg("objective"), nb::arg("objective_constant")=0.0,
            nb::arg("variable_lower_bounds")=nb::none(), nb::arg("variable_upper_bounds")=nb::none(),
@@ -145,5 +148,6 @@ static void bind_batch(nb::module_ &m) {
            nb::arg("primal_start")=nb::none(), nb::arg("dual_start")=nb::none(), nb::arg("reduced_cost_start")=nb::none(),
            nb::arg("primal_start_mask")=nb::none(), nb::arg("dual_start_mask")=nb::none(), nb::arg("reduced_cost_start_mask")=nb::none(),
            nb::arg("parameters")=nb::none(), nb::arg("execution")="auto", nb::arg("time_sec_limit")=INFINITY,
-           nb::arg("resident_memory_budget_bytes")=0, nb::arg("lp_tile_width")=4, nb::arg("iteration_batch_size")=16);
+           nb::arg("resident_memory_budget_bytes")=0, nb::arg("lp_tile_width")=4, nb::arg("iteration_batch_size")=16,
+           nb::arg("row_aware_scheduling")=false);
 }

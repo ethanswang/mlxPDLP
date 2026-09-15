@@ -24,6 +24,7 @@ struct BatchOptions {
     size_t resident_memory_budget_bytes = 0; // zero: unconstrained
     int lp_tile_width = 4;                  // 4 or 8
     int iteration_batch_size = 16;          // K; independent of request width B
+    bool row_aware_scheduling = false;      // opt in to guarded row packing for shared SpMM
 };
 
 struct SolveResultDeleter {
@@ -60,6 +61,7 @@ struct BatchResult {
     int lp_tile_width = 0;
     int iteration_batch_size = 0;
     bool native_iteration_batching_active = false;
+    bool row_aware_scheduling_active = false;
 };
 
 // Owns exact original FP64 CSR and immutable matrix preparation. Submissions

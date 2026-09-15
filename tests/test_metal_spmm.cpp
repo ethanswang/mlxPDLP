@@ -30,17 +30,23 @@ int main() {
             for (int i = 0; i < columns; ++i) for (int j = 0; j < width; ++j)
                 x[size_t(i)*padded+j] = float(int(rng()%23)-11)/8;
             std::vector<int> active(padded, 0); std::fill_n(active.begin(), width, 1);
+            if (width > 2) {
+                active[1] = 0;
+                for (int i = 0; i < columns; ++i) x[size_t(i)*padded+1] = NAN;
+            }
             auto starts = mx::array(rp.data(), {rows+1}, mx::int32);
             auto indices = detail::metal_column_indices(ci, columns);
             auto vals = mx::array(values.data(), {int(values.size())}, mx::float32);
             auto vectors = mx::array(x.data(), {columns,padded}, mx::float32);
             auto mask = mx::array(active.data(), {padded}, mx::int32);
-            for (int reduction : {1,32/tile}) {
-                auto product = detail::metal_spmm(starts,indices,vals,vectors,mask,rows,tile,reduction,stream);
+            detail::MetalSpmmRowSchedule schedule(detail::make_metal_spmm_row_work(rp,tile));
+            for (int reduction : {0,1,32/tile}) {
+                auto product = detail::metal_spmm(starts,indices,vals,vectors,mask,rows,tile,reduction,stream,
+                                                  reduction == 0 ? &schedule : nullptr);
                 mx::eval(product);
                 for (int r = 0; r < rows; ++r) for (int j = 0; j < padded; ++j) {
                     double expected = 0;
-                    if (j < width) for (int k = rp[r]; k < rp[r+1]; ++k)
+                    if (active[j]) for (int k = rp[r]; k < rp[r+1]; ++k)
                         expected += double(values[k])*x[size_t(ci[k])*padded+j];
                     double actual = product.data<float>()[r*padded+j];
                     if (!std::isfinite(actual) || std::abs(actual-expected) > 1e-5*(1+std::abs(expected)))
@@ -61,7 +67,7 @@ int main() {
             }
             std::vector<float> y(rows*padded,NAN);
             std::vector<double> expected(size_t(columns)*padded,0);
-            for (int r=0;r<rows;++r) for (int j=0;j<width;++j) {
+            for (int r=0;r<rows;++r) for (int j=0;j<width;++j) if (active[j]) {
                 y[r*padded+j]=float(int(rng()%23)-11)/8;
                 for (int a=rp[r];a<rp[r+1];++a)
                     expected[size_t(ci[a])*padded+j]+=double(values[a])*y[r*padded+j];
@@ -70,8 +76,10 @@ int main() {
             auto ti=detail::metal_column_indices(tci,rows);
             auto ta=mx::array(tv.data(),{int(tv.size())},mx::float32);
             auto ty=mx::array(y.data(),{rows,padded},mx::float32);
-            for (int reduction : {1,32/tile}) {
-                auto product=detail::metal_spmm(ts,ti,ta,ty,mask,columns,tile,reduction,stream);
+            detail::MetalSpmmRowSchedule transpose_schedule(detail::make_metal_spmm_row_work(trp,tile));
+            for (int reduction : {0,1,32/tile}) {
+                auto product=detail::metal_spmm(ts,ti,ta,ty,mask,columns,tile,reduction,stream,
+                                               reduction == 0 ? &transpose_schedule : nullptr);
                 mx::eval(product);
                 for (size_t a=0;a<expected.size();++a)
                     if (!std::isfinite(product.data<float>()[a]) ||
@@ -79,6 +87,6 @@ int main() {
                         throw std::runtime_error("transpose SpMM disagrees with original FP64 scatter");
             }
         }
-        std::cout << "Metal SpMM widths/tails/empty/duplicates/long rows/index boundary passed\n";
+        std::cout << "Metal SpMM row schedules/widths/tails/inactive/empty/duplicates/long rows/index boundary passed\n";
     } catch (const std::exception &e) { std::cerr << e.what() << '\n'; return 1; }
 }

@@ -99,10 +99,26 @@ correction. Original-model ray audits precede shared-path infeasibility statuses
 their owned vectors are exposed as `primal_ray` or `dual_ray` (empty otherwise).
 
 Shared kernels pack vectors as `[component,B_padded]`, with LP tile width 4 or 8.
-Both orientations choose row reduction independently. Padding and inactive LPs
-are masked. Optional native scratch reuse supports padded widths up to 256 and
-blocks up to 16 minor iterations. `iteration_batch_size` accepts 1–64 and bounds
-ordinary lazy evaluation; larger K is split around native, major and checkpoint
+Row-aware scheduling is a separate opt-in, disabled by default. Pass
+`row_aware_scheduling=True` to Python `solve_batch`, or set
+`options.row_aware_scheduling = true` on C++ `BatchOptions`. It applies only to shared
+execution and can be enabled or disabled on each submission using the same plan.
+`BatchResult.row_aware_scheduling_active` reports whether a scheduled kernel
+actually ran; opting in still permits the row-length guard to choose direct
+mapping.
+
+Each orientation chooses its row schedule independently. Packed schedules give
+rows with at most 16 nonzeros one LP tile and longer rows a full SIMD group.
+For mixed row lengths, the plan caches row maps for each tile width when packing
+removes at least half the thread slots of the direct SIMD mapping. Other
+orientations retain the direct mapping. The maps are shared by ordinary and fused
+SpMM kernels, including native iteration blocks, and count toward the plan's
+resident-memory estimate. The plan retains these immutable maps regardless of
+the per-submission toggle; disabling scheduling selects the direct kernels.
+Padding and inactive LPs are masked. Optional native scratch reuse supports
+padded widths up to 256 and blocks up to 16 minor iterations.
+`iteration_batch_size` accepts 1–64 and bounds ordinary lazy evaluation; larger K
+is split around native, major and checkpoint
 boundaries. Other widths, zero-dimensional models, disabled native reuse and
 builds without compatible MLX encoder headers use ordinary fused MLX kernels.
 `native_iteration_batching_active` reports whether native reuse actually ran.

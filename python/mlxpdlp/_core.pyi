@@ -215,6 +215,7 @@ class BatchResult:
     lp_tile_width: int
     iteration_batch_size: int
     native_iteration_batching_active: bool
+    row_aware_scheduling_active: bool
 
 
 class SharedMatrixPlan:
@@ -242,4 +243,5 @@ class SharedMatrixPlan:
                     reduced_cost_start_mask: list[bool] | None = None,
                     parameters: Parameters | None = None, execution: str = "auto",
                     time_sec_limit: float = float("inf"), resident_memory_budget_bytes: int = 0,
-                    lp_tile_width: int = 4, iteration_batch_size: int = 16) -> BatchResult: ...
+                    lp_tile_width: int = 4, iteration_batch_size: int = 16,
+                    row_aware_scheduling: bool = False) -> BatchResult: ...
