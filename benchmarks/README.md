@@ -13,6 +13,10 @@ Three benchmark modes are available:
 - `mlxpdlp_lpfeas_benchmark` runs provenance-tracked LPfeas or Netlib manifests
   to convergence and writes independently audited CSV and JSON reports.
 
+[Optional CPU references](reference/README.md) provide OR-Tools PDLP and HiGHS
+in separate, removable directories with on-demand environments. They use the
+same datasets and audit equations and do not participate in the mlxPDLP build.
+
 Configure and build it with:
 
 ```sh
