@@ -31,6 +31,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -40,7 +41,9 @@ namespace nb = nanobind;
 using namespace mlxpdlp;
 
 using F64Arr = nb::ndarray<const double, nb::shape<-1>, nb::c_contig>;
-using I32Arr = nb::ndarray<const int32_t, nb::shape<-1>, nb::c_contig>;
+// Preserve the input dtype until its values have been range-checked. A typed
+// int32 ndarray argument lets nanobind narrow int64/uint64 before validation.
+using IndexArr = nb::ndarray<nb::ro, nb::shape<-1>, nb::c_contig, nb::device::cpu>;
 
 // ---------------------------------------------------------------------------
 // numpy helpers
@@ -67,8 +70,73 @@ static nb::object to_numpy_i32(const int32_t *src, size_t n) {
     return to_numpy<int32_t>(src, n, "int32");
 }
 
-static std::vector<int32_t> as_i32_vector(const I32Arr &array) {
-    return std::vector<int32_t>(array.data(), array.data() + array.size());
+template <typename Integer>
+static std::vector<int32_t> checked_index_values(const IndexArr &array, const char *name) {
+    const auto *source = static_cast<const Integer *>(array.data());
+    std::vector<int32_t> result(array.size());
+    for (size_t i = 0; i < array.size(); ++i) {
+        // Negative signed values also exceed the limit after conversion to uint64.
+        const uint64_t value = static_cast<uint64_t>(source[i]);
+        if (value > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
+            throw nb::value_error((std::string(name) +
+                ": indices must be in [0, INT32_MAX]").c_str());
+        result[i] = static_cast<int32_t>(value);
+    }
+    return result;
+}
+
+static std::vector<int32_t> checked_indices(const IndexArr &array, const char *name) {
+    const auto dtype = array.dtype();
+    if (dtype.lanes == 1) {
+        if (dtype.code == static_cast<uint8_t>(nb::dlpack::dtype_code::Int)) {
+            switch (dtype.bits) {
+            case 8: return checked_index_values<int8_t>(array, name);
+            case 16: return checked_index_values<int16_t>(array, name);
+            case 32: return checked_index_values<int32_t>(array, name);
+            case 64: return checked_index_values<int64_t>(array, name);
+            }
+        } else if (dtype.code == static_cast<uint8_t>(nb::dlpack::dtype_code::UInt)) {
+            switch (dtype.bits) {
+            case 8: return checked_index_values<uint8_t>(array, name);
+            case 16: return checked_index_values<uint16_t>(array, name);
+            case 32: return checked_index_values<uint32_t>(array, name);
+            case 64: return checked_index_values<uint64_t>(array, name);
+            }
+        }
+    }
+    throw nb::type_error((std::string(name) + ": expected an integer array").c_str());
+}
+
+struct CsrIndices {
+    std::vector<int32_t> row_ptr;
+    std::vector<int32_t> col_ind;
+};
+
+static CsrIndices checked_csr_indices(int n, int m, const IndexArr &row_ptr,
+                                     const IndexArr &col_indices, size_t value_count) {
+    if (n < 0 || m < 0)
+        throw nb::value_error("num_variables and num_constraints must be non-negative");
+    if (row_ptr.size() != static_cast<size_t>(m) + 1)
+        throw nb::value_error("row_ptr must have num_constraints + 1 entries");
+    if (col_indices.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+        throw nb::value_error("col_indices: nonzero count exceeds INT32_MAX");
+    if (col_indices.size() != value_count)
+        throw nb::value_error("col_indices and values must have the same number of entries");
+
+    CsrIndices csr;
+    csr.row_ptr = checked_indices(row_ptr, "row_ptr");
+    if (csr.row_ptr.front() != 0)
+        throw nb::value_error("row_ptr[0] must be 0");
+    if (static_cast<size_t>(csr.row_ptr.back()) != value_count)
+        throw nb::value_error("col_indices and values must both have row_ptr[-1] entries");
+    if (!std::is_sorted(csr.row_ptr.begin(), csr.row_ptr.end()))
+        throw nb::value_error("row_ptr must be non-decreasing");
+
+    csr.col_ind = checked_indices(col_indices, "col_indices");
+    for (int32_t column : csr.col_ind)
+        if (column >= n)
+            throw nb::value_error("col_indices must be in [0, num_variables)");
+    return csr;
 }
 
 static mx::Device parse_device(const std::string &device) {
@@ -450,7 +518,7 @@ static void bind_solver(nb::module_ &m) {
         .def(
             "__init__",
             [](MlxPdlpSolver *self, int num_variables, int num_constraints,
-               const I32Arr &row_ptr, const I32Arr &col_indices,
+               const IndexArr &row_ptr, const IndexArr &col_indices,
                const F64Arr &values,
                const std::optional<F64Arr> &variable_lower_bounds,
                const std::optional<F64Arr> &variable_upper_bounds,
@@ -464,26 +532,8 @@ static void bind_solver(nb::module_ &m) {
                const std::string &device) {
                 // --- input validation (mirrors the C++ constructor checks,
                 // but with Python-friendly errors before any reads) ---
-                if (num_variables < 0 || num_constraints < 0)
-                    throw nb::value_error(
-                        "num_variables and num_constraints must be non-negative");
-                if (row_ptr.size() != static_cast<size_t>(num_constraints) + 1)
-                    throw nb::value_error(
-                        "row_ptr must have num_constraints + 1 entries");
-                if (row_ptr(0) != 0)
-                    throw nb::value_error("row_ptr[0] must be 0");
-                const int64_t nnz = row_ptr(num_constraints);
-                if (nnz < 0)
-                    throw nb::value_error("row_ptr must be non-decreasing");
-                if (col_indices.size() != static_cast<size_t>(nnz) ||
-                    values.size() != static_cast<size_t>(nnz))
-                    throw nb::value_error(
-                        "col_indices and values must both have row_ptr[-1] "
-                        "entries");
-                for (size_t i = 0; i < row_ptr.size() - 1; ++i)
-                    if (row_ptr(i) > row_ptr(i + 1))
-                        throw nb::value_error(
-                            "row_ptr must be non-decreasing");
+                auto csr = checked_csr_indices(num_variables, num_constraints,
+                                               row_ptr, col_indices, values.size());
                 if (objective.size() != static_cast<size_t>(num_variables))
                     throw nb::value_error(
                         "objective must have num_variables entries");
@@ -525,8 +575,8 @@ static void bind_solver(nb::module_ &m) {
                         "the Metal GPU device is not available in this MLX "
                         "build; use device='cpu'");
 
-                std::vector<int32_t> csr_row_ptr = as_i32_vector(row_ptr);
-                std::vector<int32_t> csr_col_ind = as_i32_vector(col_indices);
+                const auto &csr_row_ptr = csr.row_ptr;
+                const auto &csr_col_ind = csr.col_ind;
                 const double *var_lb = variable_lower_bounds
                                            ? variable_lower_bounds->data()
                                            : nullptr;

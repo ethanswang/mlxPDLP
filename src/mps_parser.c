@@ -23,12 +23,22 @@ limitations under the License.
 #include <ctype.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
 
 #define READER_BUFFER_SIZE (4 * 1024 * 1024)
+
+// Tests lower this limit to exercise the real parser's count boundaries using
+// small files. Production CSR positions and dimensions remain int32.
+#ifndef MLXPDLP_MPS_INDEX_LIMIT
+#define MLXPDLP_MPS_INDEX_LIMIT INT32_MAX
+#endif
+#if MLXPDLP_MPS_INDEX_LIMIT <= 0 || MLXPDLP_MPS_INDEX_LIMIT > INT32_MAX
+#error "MPS index limit must be in [1, INT32_MAX]"
+#endif
 
 typedef struct NameNode {
     char *name;
@@ -57,15 +67,17 @@ static void namemap_init(NameMap *map, size_t num_buckets) {
     map->buckets = safe_calloc(num_buckets, sizeof(NameNode *));
 }
 
-static void namemap_resize(NameMap *map) {
-    int old_num_buckets = map->num_buckets;
+static bool namemap_resize(NameMap *map) {
+    size_t old_num_buckets = map->num_buckets;
+    if (old_num_buckets > SIZE_MAX / sizeof(NameNode *) / 2)
+        return false;
     NameNode **old_buckets = map->buckets;
 
-    int new_num_buckets = old_num_buckets * 2;
+    size_t new_num_buckets = old_num_buckets * 2;
     map->num_buckets = new_num_buckets;
     map->buckets = safe_calloc(new_num_buckets, sizeof(NameNode *));
 
-    for (int i = 0; i < old_num_buckets; ++i) {
+    for (size_t i = 0; i < old_num_buckets; ++i) {
         NameNode *current = old_buckets[i];
         while (current) {
             NameNode *next = current->next;
@@ -80,6 +92,7 @@ static void namemap_resize(NameMap *map) {
     }
 
     free(old_buckets);
+    return true;
 }
 
 static void namemap_free(NameMap *map) {
@@ -109,17 +122,22 @@ static int namemap_get(const NameMap *map, const char *name) {
 }
 
 static int namemap_put(NameMap *map, const char *name) {
-
-    if (map->size >= map->num_buckets * 0.75) {
-        namemap_resize(map);
-    }
-
     unsigned long h = hash_string(name) % (unsigned long)map->num_buckets;
 
     for (NameNode *p = map->buckets[h]; p; p = p->next) {
         if (strcmp(p->name, name) == 0) {
             return p->index;
         }
+    }
+
+    if (map->size >= MLXPDLP_MPS_INDEX_LIMIT) {
+        fprintf(stderr, "ERROR: MPS matrix dimension exceeds INT32_MAX.\n");
+        return -1;
+    }
+    if (map->size >= map->num_buckets * 0.75) {
+        if (!namemap_resize(map))
+            return -1;
+        h = hash_string(name) % (unsigned long)map->num_buckets;
     }
 
     NameNode *new_node = safe_malloc(sizeof(NameNode));
@@ -130,7 +148,7 @@ static int namemap_put(NameMap *map, const char *name) {
         return -1;
     }
 
-    new_node->index = map->size++;
+    new_node->index = (int)map->size++;
     new_node->next = map->buckets[h];
     map->buckets[h] = new_node;
 
@@ -289,8 +307,14 @@ typedef struct {
 } MpsParserState;
 
 static int add_coo_entry(CooMatrix *coo, int row, int col, double value) {
+    if (coo->nnz >= MLXPDLP_MPS_INDEX_LIMIT) {
+        fprintf(stderr, "ERROR: MPS nonzero count exceeds INT32_MAX.\n");
+        return -1;
+    }
     if (coo->nnz >= coo->capacity) {
         size_t new_capacity = (coo->capacity == 0) ? 1024 : coo->capacity * 2;
+        if (new_capacity > MLXPDLP_MPS_INDEX_LIMIT)
+            new_capacity = MLXPDLP_MPS_INDEX_LIMIT;
         coo->row_indices = (int *)safe_realloc(coo->row_indices, new_capacity * sizeof(int));
         coo->col_indices = (int *)safe_realloc(coo->col_indices, new_capacity * sizeof(int));
         coo->values = (double *)safe_realloc(coo->values, new_capacity * sizeof(double));
@@ -304,11 +328,17 @@ static int add_coo_entry(CooMatrix *coo, int row, int col, double value) {
 }
 
 static bool ensure_column_capacity(MpsParserState *state) {
+    if (state->col_map.size >= MLXPDLP_MPS_INDEX_LIMIT) {
+        fprintf(stderr, "ERROR: MPS variable count exceeds INT32_MAX.\n");
+        return false;
+    }
     if (state->col_map.size < state->col_capacity) {
         return true;
     }
 
     size_t new_cap = (state->col_capacity == 0) ? 256 : state->col_capacity * 2;
+    if (new_cap > MLXPDLP_MPS_INDEX_LIMIT)
+        new_cap = MLXPDLP_MPS_INDEX_LIMIT;
 
     if (new_cap < state->col_capacity) {
         return false;
@@ -770,11 +800,19 @@ lp_problem_t *read_mps_file(const char *filename) {
         return NULL;
     }
 
+    if (state.col_map.size > MLXPDLP_MPS_INDEX_LIMIT ||
+        state.row_map.size > MLXPDLP_MPS_INDEX_LIMIT ||
+        state.coo_matrix.nnz > MLXPDLP_MPS_INDEX_LIMIT) {
+        fprintf(stderr, "ERROR: MPS dimensions or nonzero count exceed INT32_MAX.\n");
+        free_parser_state(&state);
+        return NULL;
+    }
+
     lp_problem_t *prob = safe_calloc(1, sizeof(lp_problem_t));
 
-    prob->num_variables = state.col_map.size;
-    prob->num_constraints = state.row_map.size;
-    prob->constraint_matrix_num_nonzeros = state.coo_matrix.nnz;
+    prob->num_variables = (int)state.col_map.size;
+    prob->num_constraints = (int)state.row_map.size;
+    prob->constraint_matrix_num_nonzeros = (int)state.coo_matrix.nnz;
     prob->objective_constant = state.objective_constant;
     prob->objective_sense = state.objective_sense;
 
@@ -826,40 +864,43 @@ static int parse_rows_section(MpsParserState *state, char **tokens, int n_tokens
 }
 
 static int finalize_rows(MpsParserState *state) {
-    int obj_idx = -1;
+    size_t obj_idx = SIZE_MAX;
 
     for (size_t i = 0; i < state->num_buffered_rows; ++i) {
         if (state->buffered_rows[i].type == 'N') {
-            obj_idx = (int)i;
+            obj_idx = i;
             break;
         }
     }
 
-    if (obj_idx == -1 && state->num_buffered_rows > 0) {
+    if (obj_idx == SIZE_MAX && state->num_buffered_rows > 0) {
         obj_idx = 0;
     }
 
-    if (obj_idx != -1) {
+    if (obj_idx != SIZE_MAX) {
         state->objective_row_name = strdup(state->buffered_rows[obj_idx].name);
         if (!state->objective_row_name)
             return -1;
     }
 
     for (size_t i = 0; i < state->num_buffered_rows; ++i) {
-        if ((int)i == obj_idx)
+        if (i == obj_idx)
             continue;
 
         char type = state->buffered_rows[i].type;
         if (type == 'E' || type == 'L' || type == 'G') {
-            size_t current_size = state->row_map.size;
-            if (current_size >= state->constraint_capacity) {
+            int row_index = namemap_put(&state->row_map, state->buffered_rows[i].name);
+            if (row_index < 0)
+                return -1;
+            if (state->row_map.size > state->constraint_capacity) {
                 state->constraint_capacity =
                     (state->constraint_capacity == 0) ? 64 : state->constraint_capacity * 2;
+                if (state->constraint_capacity > MLXPDLP_MPS_INDEX_LIMIT)
+                    state->constraint_capacity = MLXPDLP_MPS_INDEX_LIMIT;
                 state->constraint_types = (char *)safe_realloc(
                     state->constraint_types, state->constraint_capacity * sizeof(char));
             }
-            namemap_put(&state->row_map, state->buffered_rows[i].name);
-            state->constraint_types[current_size] = type;
+            state->constraint_types[row_index] = type;
         }
     }
     size_t num_constraints = state->row_map.size;
@@ -913,12 +954,14 @@ static int parse_columns_section(MpsParserState *state, char **tokens, int n_tok
         pair_start_index = 0;
     }
 
-    if (!ensure_column_capacity(state))
-        return -1;
-
-    int col_idx = namemap_put(&state->col_map, col_name);
-    if (col_idx == -1)
-        return -1;
+    int col_idx = namemap_get(&state->col_map, col_name);
+    if (col_idx < 0) {
+        if (!ensure_column_capacity(state))
+            return -1;
+        col_idx = namemap_put(&state->col_map, col_name);
+        if (col_idx < 0)
+            return -1;
+    }
 
     for (int i = pair_start_index; i + 1 < n_tokens; i += 2) {
         const char *row_name = tokens[i];
@@ -1037,6 +1080,8 @@ static int parse_bounds_section(MpsParserState *state, char **tokens, int n_toke
 }
 
 static int mps_coo_to_csr(lp_problem_t *prob, CooMatrix *coo, size_t num_constraints) {
+    if (num_constraints > MLXPDLP_MPS_INDEX_LIMIT || coo->nnz > MLXPDLP_MPS_INDEX_LIMIT)
+        return -1;
 
     prob->constraint_matrix_row_pointers = safe_calloc(num_constraints + 1, sizeof(int));
     prob->constraint_matrix_col_indices = safe_malloc(coo->nnz * sizeof(int));

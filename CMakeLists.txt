@@ -437,6 +437,19 @@ if(BUILD_TESTING)
         mlxpdlp_enable_warnings(mlxpdlp_mps_parser_test)
         add_test(NAME mps_parser COMMAND mlxpdlp_mps_parser_test)
 
+        add_executable(mlxpdlp_mps_index_limits_test
+            tests/test_mps_index_limits.cpp
+            src/mps_loader.c
+            src/mps_parser.c
+        )
+        target_compile_definitions(mlxpdlp_mps_index_limits_test PRIVATE
+            MLXPDLP_MPS_INDEX_LIMIT=8
+        )
+        target_include_directories(mlxpdlp_mps_index_limits_test PRIVATE include src)
+        target_link_libraries(mlxpdlp_mps_index_limits_test PRIVATE ZLIB::ZLIB)
+        mlxpdlp_enable_warnings(mlxpdlp_mps_index_limits_test)
+        add_test(NAME mps_index_limits COMMAND mlxpdlp_mps_index_limits_test)
+
         add_executable(mlxpdlp_lpfeas_validation_test
             tests/test_lpfeas_validation.cpp
         )

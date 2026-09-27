@@ -49,6 +49,11 @@ solver = mlxpdlp.Solver(
 result = solver.solve()                     # SolveResult
 ```
 
+- CSR indices must use an integer dtype. Signed and unsigned integer arrays
+  (including `int64`) are checked before conversion to the solver's `int32`
+  storage. Negative indices and values above `INT32_MAX` raise `ValueError`;
+  non-integer index arrays raise `TypeError`. Dimensions and the nonzero count
+  must also fit in `int32`. The same rules apply to `SharedMatrixPlan`.
 - `parameters` is an optional `mlxpdlp.Parameters` instance; defaults
   come from `mlxpdlp_set_default_parameters`.
 - Warm starts are given in original, unscaled problem coordinates and

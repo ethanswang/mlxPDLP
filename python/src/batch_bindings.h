@@ -33,14 +33,12 @@ static void bind_batch(nb::module_ &m) {
         .def_ro("native_iteration_batching_active", &PythonBatchResult::native_iteration_batching_active)
         .def_ro("row_aware_scheduling_active", &PythonBatchResult::row_aware_scheduling_active);
     nb::class_<SharedMatrixPlan>(m, "SharedMatrixPlan")
-        .def("__init__", [](SharedMatrixPlan *self, int n, int rows, const I32Arr &rp,
-                            const I32Arr &ci, const F64Arr &values, pdhg_parameters_t *params,
+        .def("__init__", [](SharedMatrixPlan *self, int n, int rows, const IndexArr &rp,
+                            const IndexArr &ci, const F64Arr &values, pdhg_parameters_t *params,
                             const std::string &device) {
-            if (n < 0 || rows < 0 || rp.size() != size_t(rows)+1)
-                throw nb::value_error("matrix.row_ptr: expected num_constraints + 1 entries");
-            if (rp(rows) < 0 || ci.size() != size_t(rp(rows)) || values.size() != ci.size())
-                throw nb::value_error("matrix: CSR values and column indices must match row_ptr[-1]");
-            new (self) SharedMatrixPlan(n, rows, rp.data(), ci.data(), values.data(), params, parse_device(device));
+            auto csr = checked_csr_indices(n, rows, rp, ci, values.size());
+            new (self) SharedMatrixPlan(n, rows, csr.row_ptr.data(), csr.col_ind.data(),
+                                       values.data(), params, parse_device(device));
         }, nb::arg("num_variables"), nb::arg("num_constraints"), nb::arg("row_ptr"),
            nb::arg("col_indices"), nb::arg("values"), nb::arg("parameters") = nb::none(), nb::arg("device") = "cpu")
         .def_prop_ro("num_variables", &SharedMatrixPlan::num_variables)
