@@ -60,6 +60,13 @@ and the project intends to follow
 
 ### Changed
 
+- Single solves, batch-plan construction, and batch parameter overrides now
+  use one validator, including through Python. Invalid settings raise errors
+  naming the field and value. Fixed-work zero optimality/feasibility tolerances
+  are supported consistently in single and batch solves, including Python's
+  `tolerance = 0` alias. Infeasibility tolerance remains positive. Negative
+  budgets, nonfinite tolerances, and invalid scaling, restart, norm, and
+  polishing settings are rejected before solving.
 - Metal minor iterations now reuse two solver-owned scratch-buffer pairs across
   batches of up to 16 iterations instead of retaining every intermediate MLX
   array. Native batching is enabled by default, can be disabled per solve, and

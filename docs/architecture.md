@@ -63,6 +63,7 @@ loader uses globally visible `mlxpdlp_`-prefixed names.
 |---|---|
 | `include/mlxPDLP/solver.h` | Public solver types, state, and `MlxPdlpSolver` API |
 | `src/solver.cpp` | MLX-backed PDHG implementation |
+| `src/parameter_validation.*` | Shared solver-parameter contract for single and batch entry points |
 | `src/metal_minor_batch.*` | Private Metal encoder adapter for buffer-reusing minor-iteration batches |
 | `src/metal_spmv.h` | Shared Metal CSR work descriptors, reductions, and standalone dispatch |
 | `src/pdhg_control.h` | Shared guarded PID/HPR updates and numerical-metric checks |
@@ -499,6 +500,26 @@ problem (finiteness is preserved by every preconditioner, so only the
 post-Ruiz refresh is required).
 
 ## Default parameters
+
+Single-solver construction, shared-matrix plan construction, and every batch
+submission call `detail::validate_parameters()` in
+`src/parameter_validation.cpp`. Python uses the same C++ entry points, so it
+reports the same field-specific errors as `ValueError` (C++ uses
+`std::invalid_argument`). Invalid batch overrides are rejected before checking
+preparation compatibility or returning an empty batch, without changing the plan.
+
+Optimality, feasibility, and feasibility-polishing tolerances must be finite
+and nonnegative. Zero optimality or feasibility tolerance disables optimality
+termination for fixed-work runs. Infeasibility tolerance and `sv_tol` must be
+finite and positive.
+Iteration counts and time budgets are nonnegative; positive infinity is an
+unlimited time budget. `sv_max_iter=0` retains the norm-bound fallback.
+Scaling counts and `matrix_zero_tol` are nonnegative, with a finite matrix
+threshold. Enabled Pock-Chambolle scaling requires finite alpha in `[0, 2]`;
+an unused alpha is ignored. Restart gains and thresholds must be finite,
+`i_smooth` is in `[0, 1]`, reflection is in `(0, 1]`, and only the defined norm
+and restart-policy values are accepted. Host-double polishing budgets obey the
+same nonnegative budget rules even when polishing is disabled.
 
 `mlxpdlp_set_default_parameters()` initializes:
 
@@ -1070,6 +1091,7 @@ CTest registers:
 | `netlib_convergence_example` | Netlib ADLITTLE convergence sweep and published-objective check |
 | `mlx_basic` | Basic MLX CPU array operations |
 | `solver` | Solver, warm-start, presolve, postsolve, termination, and FP64 Farkas infeasibility-certificate regressions |
+| `parameter_validation_cpu`, `parameter_validation_metal` | Consistent parameter errors across single solves, batch plans and overrides; fixed-work and zero-budget compatibility |
 | `pdhg_safeguards_cpu`, `pdhg_safeguards_metal` | Underestimated spectral norm, bounded recovery, conservative steps, PID/HPR guards, FP64 feedback, and native continuation |
 | `metal_spmv` | Independent FP64 reference checks for all four row mappings, both orientations, empty/duplicate/cancelling rows, incomplete work packs, and 16-/32-bit index boundaries |
 | `metal_iteration_batch` | Byte-identical batched/unbatched solver state across batch, checkpoint, sparse-layout, and index-width boundaries; compiled-adapter fallback behavior |

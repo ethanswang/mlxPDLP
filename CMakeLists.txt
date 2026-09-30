@@ -142,7 +142,7 @@ endfunction()
 
 # Solver library
 add_library(mlxpdlp_solver STATIC src/solver.cpp src/host_double_polish.cpp
-    src/shared_matrix.cpp src/batch_solver.cpp)
+    src/shared_matrix.cpp src/batch_solver.cpp src/parameter_validation.cpp)
 add_library(mlxPDLP::solver ALIAS mlxpdlp_solver)
 set_target_properties(mlxpdlp_solver PROPERTIES
     EXPORT_NAME solver
@@ -379,6 +379,12 @@ if(BUILD_TESTING)
 
     add_test(NAME mlx_basic COMMAND mlxpdlp_mlx_basic_test)
     add_test(NAME solver COMMAND mlxpdlp_solver_test)
+    add_executable(mlxpdlp_parameter_validation_test tests/test_parameter_validation.cpp)
+    target_link_libraries(mlxpdlp_parameter_validation_test PRIVATE mlxPDLP::solver)
+    mlxpdlp_enable_warnings(mlxpdlp_parameter_validation_test)
+    add_test(NAME parameter_validation_cpu COMMAND mlxpdlp_parameter_validation_test cpu)
+    add_test(NAME parameter_validation_metal COMMAND mlxpdlp_parameter_validation_test gpu)
+    set_tests_properties(parameter_validation_metal PROPERTIES SKIP_RETURN_CODE 77)
     add_executable(mlxpdlp_pdhg_safeguards tests/test_pdhg_safeguards.cpp)
     target_include_directories(mlxpdlp_pdhg_safeguards PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(mlxpdlp_pdhg_safeguards PRIVATE mlxPDLP::solver)

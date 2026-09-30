@@ -5,6 +5,7 @@
 #include "metal_spmm.h"
 #include "metal_minor_batch.h"
 #include "pdhg_control.h"
+#include "parameter_validation.h"
 #include <algorithm>
 #include <array>
 #include <climits>
@@ -56,26 +57,6 @@ void validate_member(const BatchProblem &p, int n, int m, size_t index, bool pre
     if (p.reduced_cost_start) vector(*p.reduced_cost_start, n, "reduced_cost_start", false, 0);
     if (presolve && (p.primal_start || p.dual_start || p.reduced_cost_start))
         throw std::invalid_argument(prefix + "warm_start: incompatible with presolve");
-}
-void validate_parameters(const pdhg_parameters_t &p) {
-    const auto &t = p.termination_criteria;
-    for (double value : {t.eps_optimal_relative, t.eps_feasible_relative, t.eps_infeasible_relative,
-                         t.eps_feas_polish_relative})
-        if (!std::isfinite(value) || value <= 0) throw std::invalid_argument("parameters: invalid tolerance");
-    if (t.iteration_limit < 0 || std::isnan(t.time_sec_limit) || t.time_sec_limit < 0 ||
-        p.geometric_mean_iterations < 0 || p.curtis_reid_iterations < 0 || p.l_inf_ruiz_iterations < 0 ||
-        p.termination_evaluation_frequency <= 0 || p.sv_max_iter < 0 ||
-        !std::isfinite(p.sv_tol) || p.sv_tol <= 0 || p.restart_policy < 0 || p.restart_policy > 1 ||
-        (p.optimality_norm != NORM_TYPE_L2 && p.optimality_norm != NORM_TYPE_L_INF) ||
-        !std::isfinite(p.reflection_coefficient) || p.reflection_coefficient <= 0 || p.reflection_coefficient > 1)
-        throw std::invalid_argument("parameters: invalid algorithm setting");
-    const auto &r = p.restart_params;
-    for (double value : {r.k_p, r.k_i, r.k_d, r.i_smooth, r.artificial_restart_threshold,
-                         r.sufficient_reduction_for_restart, r.necessary_reduction_for_restart})
-        if (!std::isfinite(value)) throw std::invalid_argument("parameters.restart_params: non-finite value");
-    if (r.i_smooth < 0 || r.i_smooth > 1 || (p.has_pock_chambolle_alpha &&
-        (!std::isfinite(p.pock_chambolle_alpha) || p.pock_chambolle_alpha < 0 || p.pock_chambolle_alpha > 2)))
-        throw std::invalid_argument("parameters: invalid scaling or restart setting");
 }
 bool same_preparation(const pdhg_parameters_t &a, const pdhg_parameters_t &b) {
     return a.geometric_mean_iterations == b.geometric_mean_iterations &&

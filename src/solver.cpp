@@ -25,6 +25,7 @@ limitations under the License.
 #include "metal_minor_batch.h"
 #include "metal_spmv.h"
 #include "pdhg_control.h"
+#include "parameter_validation.h"
 
 #include "mlx/allocator.h"
 #include "mlx/backend/cpu/encoder.h"
@@ -404,29 +405,7 @@ MlxPdlpSolver::MlxPdlpSolver(int num_vars, int num_cons, const int *csr_row_ptr,
     else
         set_default_parameters(&params_);
 
-    if (!std::isfinite(params_.termination_criteria.eps_infeasible_relative) ||
-        params_.termination_criteria.eps_infeasible_relative <= 0.0) {
-        throw std::invalid_argument("eps_infeasible_relative must be finite and positive");
-    }
-    const auto &restart = params_.restart_params;
-    if (!std::isfinite(restart.k_p) || !std::isfinite(restart.k_i) || !std::isfinite(restart.k_d) ||
-        !std::isfinite(restart.i_smooth) || restart.i_smooth < 0.0 || restart.i_smooth > 1.0) {
-        throw std::invalid_argument("PID gains must be finite and i_smooth must be in [0, 1]");
-    }
-    if (!std::isfinite(params_.reflection_coefficient) || params_.reflection_coefficient <= 0.0 ||
-        params_.reflection_coefficient > 1.0) {
-        throw std::invalid_argument("reflection_coefficient must be in (0, 1]");
-    }
-    if (params_.restart_policy < 0 || params_.restart_policy > 1 ||
-        params_.termination_evaluation_frequency <= 0 || params_.sv_max_iter < 0 ||
-        !std::isfinite(params_.sv_tol) || params_.sv_tol <= 0.0) {
-        throw std::invalid_argument(
-            "invalid restart policy, evaluation frequency, or SV parameters");
-    }
-    if (params_.has_pock_chambolle_alpha &&
-        (!std::isfinite(params_.pock_chambolle_alpha) || params_.pock_chambolle_alpha < 0.0 ||
-         params_.pock_chambolle_alpha > 2.0))
-        throw std::invalid_argument("pock_chambolle_alpha must be in [0, 2]");
+    detail::validate_parameters(params_);
 
     if (num_vars < 0 || num_cons < 0 || !csr_row_ptr) {
         throw std::invalid_argument("invalid LP dimensions or CSR row pointers");

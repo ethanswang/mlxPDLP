@@ -81,6 +81,17 @@ params.termination_criteria.eps_infeasible_relative = 1e-14  # default
 params.restart_params.k_p = 0.25
 ```
 
+Parameters are validated when constructing `Solver` or `SharedMatrixPlan`, and
+when passing overrides to `solve_batch`, using the same validator as C++.
+Invalid settings raise `ValueError` naming the field and its value. Optimality
+and feasibility tolerances must be finite and nonnegative; zero (including
+`params.tolerance = 0`) disables optimality termination for fixed-work runs.
+The alias also sets the nonnegative feasibility-polishing tolerance to zero.
+Infeasibility and spectral-estimation tolerances remain finite and positive.
+Budgets are nonnegative, and time budgets accept
+`float("inf")` for no limit. See the [parameter contract](architecture.md#default-parameters)
+for the remaining ranges.
+
 `eps_infeasible_relative` controls the relative ray-certificate residual and
 must be finite and positive. It defaults to `1e-14` on both CPU and Metal and
 is independent of `Parameters.tolerance`. Increasing it can detect less
@@ -88,8 +99,7 @@ accurate rays but can misclassify nearly infeasible models. Metal also keeps
 a separate significance floor on the certificate gap to reject FP32 noise.
 
 `Parameters.restart_policy` selects the primal-weight restart rule:
-`0` = cuPDLPx PID (default), `1` = HPR-LP-style sigma update,
-`2` = frozen-weight diagnostic.
+`0` = cuPDLPx PID (default), `1` = HPR-LP-style sigma update.
 
 ### SolveResult
 
