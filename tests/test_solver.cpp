@@ -26,6 +26,7 @@ limitations under the License.
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 using namespace mlxpdlp;
 
@@ -264,6 +265,72 @@ static void test_geometric_mean_scaling() {
     CHECK_CLOSE(scaled[3], small, 1e-12, "scaled A[1,1]");
 
     mlxpdlp_result_free(result);
+    PASS();
+    return;
+
+test_cleanup:
+    mlxpdlp_result_free(result);
+}
+
+static void test_curtis_reid_after_geometric_mean_scaling() {
+    TEST("Curtis-Reid fits the matrix after geometric-mean scaling");
+
+    // Geometric mean maps the nonzero 2x2 block to +/-1. Curtis-Reid
+    // should leave it and its existing row/column scales unchanged.
+    const int col_ind[] = {0, 1, 0, 1, 2};
+    const double vals[] = {1.0, -1000.0, -1.0, 1000.0, 0.0};
+    const double root = std::sqrt(1000.0);
+    const double expected_rows[] = {root, root, 1.0};
+    const double expected_columns[] = {1.0 / root, root, 1.0};
+    auto element = [](const mx::array &array, int index) -> double {
+        return array.dtype() == mx::float64 ? array.data<double>()[index]
+                                           : array.data<float>()[index];
+    };
+    pdhg_parameters_t params;
+    mlxpdlp_set_default_parameters(&params);
+    params.verbose = false;
+    params.presolve = false;
+    params.geometric_mean_iterations = 12;
+    params.curtis_reid_iterations = 10;
+    params.l_inf_ruiz_iterations = 0;
+    params.has_pock_chambolle_alpha = false;
+    params.bound_objective_rescaling = false;
+    params.conservative_step_size = true;
+    params.termination_criteria.iteration_limit = 0;
+    params.termination_criteria.time_sec_limit = 10.0;
+    mlxpdlp_result_t *result = nullptr;
+
+    for (auto device : {mx::Device::cpu, mx::Device::gpu}) {
+        if (device == mx::Device::gpu && !mx::is_available(mx::Device::gpu))
+            continue;
+        for (int size : {3, 64}) {
+            std::vector<int> row_ptr(size + 1, 5);
+            row_ptr[0] = 0;
+            row_ptr[1] = 2;
+            std::vector<double> objective(size, 0.0);
+            std::vector<double> lower(size, -1.0), upper(size, 1.0);
+            MlxPdlpSolver solver(size, size, row_ptr.data(), col_ind, vals,
+                                 lower.data(), upper.data(), lower.data(), upper.data(),
+                                 objective.data(), 0.0, &params, device);
+            result = solver.solve();
+            const auto &state = solver.state();
+            const double tolerance = device == mx::Device::cpu ? 1e-10 : 1e-4;
+            CHECK(state.sparse_metal_active == (device == mx::Device::gpu && size == 64),
+                  "fixture should exercise dense CPU, dense Metal, and sparse Metal");
+            for (int i = 0; i < size; ++i) {
+                const double row_scale = element(state.con_rescale, i);
+                const double column_scale = element(state.var_rescale, i);
+                CHECK(std::isfinite(row_scale) && std::isfinite(column_scale),
+                      "composed scaling factors must be finite");
+                CHECK_CLOSE(row_scale, i < 3 ? expected_rows[i] : 1.0, tolerance,
+                            "Curtis-Reid should preserve equilibrated row scales");
+                CHECK_CLOSE(column_scale, i < 3 ? expected_columns[i] : 1.0, tolerance,
+                            "Curtis-Reid should preserve equilibrated column scales");
+            }
+            mlxpdlp_result_free(result);
+            result = nullptr;
+        }
+    }
     PASS();
     return;
 
@@ -2242,6 +2309,7 @@ int main() {
 
     test_default_parameters();
     test_geometric_mean_scaling();
+    test_curtis_reid_after_geometric_mean_scaling();
     test_simple_lp();
     test_medium_lp();
     test_simple_lp_tight();

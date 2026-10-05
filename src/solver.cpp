@@ -1705,6 +1705,26 @@ void MlxPdlpSolver::mlx_curtis_reid_scaling(int num_iters) {
     if (num_iters <= 0 || s_.nnz == 0)
         return;
 
+    // Dense scaling updates A while retaining the original CSR coefficients.
+    // Fit each stored entry in its current scaled coordinates, as sparse does.
+    const bool dense = !sparse_metal_candidate_ && !sparse_cpu_candidate_;
+    if (dense)
+        mx::eval(s_.con_rescale, s_.var_rescale);
+    auto coefficient_magnitude = [this, dense](int row, int k) {
+        double magnitude = std::abs(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]);
+        if (dense) {
+            const int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
+            if (s_.con_rescale.dtype() == mx::float64) {
+                magnitude /= s_.con_rescale.data<double>()[row];
+                magnitude /= s_.var_rescale.data<double>()[col];
+            } else {
+                magnitude /= s_.con_rescale.data<float>()[row];
+                magnitude /= s_.var_rescale.data<float>()[col];
+            }
+        }
+        return magnitude;
+    };
+
     std::vector<double> row_log_scale(static_cast<size_t>(s_.m), 0.0);
     std::vector<double> col_log_scale(static_cast<size_t>(s_.n), 0.0);
     std::vector<double> row_sum(static_cast<size_t>(s_.m), 0.0);
@@ -1715,8 +1735,7 @@ void MlxPdlpSolver::mlx_curtis_reid_scaling(int num_iters) {
     for (int row = 0; row < s_.m; ++row) {
         for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
              k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
-            const double magnitude =
-                std::abs(static_cast<double>(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]));
+            const double magnitude = coefficient_magnitude(row, k);
             if (!(magnitude > 0.0) || !std::isfinite(magnitude))
                 continue;
             ++row_count[static_cast<size_t>(row)];
@@ -1734,8 +1753,7 @@ void MlxPdlpSolver::mlx_curtis_reid_scaling(int num_iters) {
         for (int row = 0; row < s_.m; ++row) {
             for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
                  k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
-                const double magnitude =
-                    std::abs(static_cast<double>(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]));
+                const double magnitude = coefficient_magnitude(row, k);
                 if (!(magnitude > 0.0) || !std::isfinite(magnitude))
                     continue;
                 const int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
@@ -1753,8 +1771,7 @@ void MlxPdlpSolver::mlx_curtis_reid_scaling(int num_iters) {
         for (int row = 0; row < s_.m; ++row) {
             for (int32_t k = matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row)];
                  k < matrix_->sparse_a_row_ptr_host_[static_cast<size_t>(row) + 1]; ++k) {
-                const double magnitude =
-                    std::abs(static_cast<double>(matrix_->sparse_a_values_host_[static_cast<size_t>(k)]));
+                const double magnitude = coefficient_magnitude(row, k);
                 if (!(magnitude > 0.0) || !std::isfinite(magnitude))
                     continue;
                 const int col = matrix_->sparse_a_col_ind_host_[static_cast<size_t>(k)];
