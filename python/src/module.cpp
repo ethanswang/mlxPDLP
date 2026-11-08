@@ -174,6 +174,9 @@ static void bind_parameters(nb::module_ &m) {
                 &termination_criteria_t::eps_infeasible_relative,
                 "Relative ray-certificate residual tolerance (default 1e-14); "
                 "must be finite and positive. Independent of Parameters.tolerance.")
+        .def_rw("infeasible_ray_objective_margin",
+                &termination_criteria_t::infeasible_ray_objective_margin,
+                "Relative ray objective margin (default 1e-8; Metal uses at least 1e-3).")
         .def_rw("time_sec_limit", &termination_criteria_t::time_sec_limit,
                 "Wall-clock budget in seconds.")
         .def_rw("iteration_limit", &termination_criteria_t::iteration_limit,
@@ -215,6 +218,8 @@ static void bind_parameters(nb::module_ &m) {
         .def_rw("pock_chambolle_alpha", &pdhg_parameters_t::pock_chambolle_alpha)
         .def_rw("bound_objective_rescaling", &pdhg_parameters_t::bound_objective_rescaling)
         .def_rw("verbose", &pdhg_parameters_t::verbose)
+        .def_rw("infeasibility_detection", &pdhg_parameters_t::infeasibility_detection,
+                "Enable PDHG infeasibility certificates (presolve is independent).")
         .def_rw("termination_evaluation_frequency",
                 &pdhg_parameters_t::termination_evaluation_frequency)
         .def_rw("sv_max_iter", &pdhg_parameters_t::sv_max_iter,

@@ -82,6 +82,8 @@ typedef struct {
     double eps_feas_polish_relative;
     // Relative ray-certificate residual tolerance (positive; default 1e-14).
     double eps_infeasible_relative;
+    // Relative objective margin against cancellation in ray certificates.
+    double infeasible_ray_objective_margin;
     double time_sec_limit;
     int iteration_limit;
 } termination_criteria_t;
@@ -114,6 +116,7 @@ typedef struct {
     double host_double_polishing_time_sec_limit;
     norm_type_t optimality_norm;
     bool presolve;
+    bool infeasibility_detection;
     bool presolve_singleton_columns;
     bool presolve_doubleton_equations;
     bool presolve_parallel_rows;
@@ -496,15 +499,16 @@ class MlxPdlpSolver {
     mx::array host_double_handoff_y_ = _mlx_empty_array();
     mx::array host_double_handoff_dual_slack_ = _mlx_empty_array();
 
-    // Infeasibility-ray gaps in working (scaled) units. The ratio tests in
-    // mlx_check_termination compare residuals and gaps in these consistent
-    // units; the public state fields carry the original-unit values.
-    double working_dual_ray_objective_ = 0.0;
-    double working_primal_ray_objective_ = 0.0;
+    double primal_ray_certificate_error_ = std::numeric_limits<double>::infinity();
+    double dual_ray_certificate_error_ = std::numeric_limits<double>::infinity();
+    std::vector<mx::array> primal_ray_candidates_, dual_ray_candidates_;
+    int primal_ray_candidate_ = 0, dual_ray_candidate_ = 0;
 
     // ---- Core linear algebra ----
     mx::array mat_Ax(const mx::array &x);  // A * x
     mx::array mat_ATx(const mx::array &y); // A^T * y
+    mx::array mat_abs_product(const mx::array &v, bool transpose);
+    void prepare_absolute_matrix();
     mx::array sparse_matvec(const mx::array &row_ptr, const mx::array &col_ind,
                             const mx::array &values, const mx::array &work_offsets,
                             const mx::array &work_rows, const mx::array &x, int rows,
@@ -564,6 +568,8 @@ class MlxPdlpSolver {
     // batch graph within a bounded memory footprint.
     int fused_eval_batch_size() const;
     void mlx_compute_fixed_point_error();
+    mx::array build_fixed_point_metrics();
+    void mlx_compute_checkpoint();
     void mlx_compute_residual();
     mx::array build_residual_metrics();
     void publish_residual_metrics(const double *values);
@@ -575,8 +581,10 @@ class MlxPdlpSolver {
     void mlx_primal_feasibility_polish();
     void mlx_dual_feasibility_polish();
     void mlx_compute_infeasibility_information();
-    mx::array build_infeasibility_metrics(const mx::array *primal_product = nullptr,
-                                         const mx::array *dual_product = nullptr);
+    void prepare_infeasibility_candidates();
+    // Per candidate: original-unit objective/violation and scaled certificate
+    // error for each side. Optional products are A*d, A^T*y, |A|*|d|, |A^T|*|y|.
+    mx::array build_infeasibility_metrics(int candidate, const mx::array *products = nullptr);
     void publish_infeasibility_metrics(const double *values);
     bool infeasibility_metrics_ready_ = false;
     void mlx_perform_restart();

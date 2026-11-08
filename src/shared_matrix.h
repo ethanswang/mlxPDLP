@@ -35,6 +35,12 @@ struct SolverMatrixStorage {
     int sparse_at_work_item_count_ = 0;
     double sparse_frobenius_norm_ = 0.0;
     std::shared_ptr<detail::CpuSparseMatrix> sparse_cpu_matrix_;
+    std::shared_ptr<detail::CpuSparseMatrix> sparse_cpu_absolute_matrix_;
+    mx::array absolute_a_ = _mlx_empty_array();
+    mx::array absolute_at_ = _mlx_empty_array();
     size_t resident_bytes() const;
 };
+std::vector<double> absolute_csr_values(const std::vector<int32_t> &row_ptr,
+                                      const std::vector<int32_t> &col_ind,
+                                      const std::vector<double> &values);
 } // namespace mlxpdlp::detail

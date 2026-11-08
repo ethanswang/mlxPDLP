@@ -376,6 +376,12 @@ optimality and feasibility tolerances. Both CPU and Metal honor the requested
 ratio; Metal also rejects separation gaps near its FP32 arithmetic floor. A
 less strict value such as `1e-6` can recognize more approximate rays, with a
 corresponding risk of misclassifying nearly infeasible models.
+The residual is normalized by the ray's activity in the rescaled matrix,
+and three projected candidate directions are checked. The separate
+`infeasible_ray_objective_margin` defaults to `1e-8` (at least `1e-3` on
+Metal) and rejects objective cancellation. Set
+`parameters.infeasibility_detection = false` to disable PDHG ray detection;
+PSLP presolve remains independent.
 
 PSLP presolve is enabled by the default parameters when presolve support was
 built. Set `parameters.presolve = false` to use warm starts or to run the

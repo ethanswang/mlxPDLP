@@ -10,6 +10,14 @@ and the project intends to follow
 
 ### Added
 
+- cuPDLPx #112 infeasibility checks: three projected candidate rays,
+  activity-normalized residuals, and a relative objective margin. C++/Python
+  expose `infeasibility_detection` and `infeasible_ray_objective_margin`.
+  The conservative `1e-14` residual default remains; Metal retains an extra
+  `1e-3` objective-margin floor. Shared batches audit and export the selected ray.
+- Combined fixed-point and optimality checkpoint evaluation for single LPs,
+  and regression coverage for scaled objectives, lost fixed-point deltas,
+  detection controls, and CPU benchmark results solved entirely by presolve.
 - Explicit shared-matrix LP batches with immutable matrix preparation, C++ and
   Python APIs, fused Metal SpMM, independent numerical control and original-FP64
   certificate audits. Bounded resident groups, request deadlines, owned results,

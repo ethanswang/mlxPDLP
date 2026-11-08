@@ -97,6 +97,12 @@ must be finite and positive. It defaults to `1e-14` on both CPU and Metal and
 is independent of `Parameters.tolerance`. Increasing it can detect less
 accurate rays but can misclassify nearly infeasible models. Metal also keeps
 a separate significance floor on the certificate gap to reject FP32 noise.
+Residuals are normalized by ray activity in the rescaled matrix. The separate
+`termination_criteria.infeasible_ray_objective_margin` must be finite and
+nonnegative, defaults to `1e-8`, and compares the gap with the sum of absolute
+objective terms. Metal uses at least `1e-3`. Set
+`Parameters.infeasibility_detection=False` to disable PDHG ray checks;
+presolve can still detect infeasibility.
 
 `Parameters.restart_policy` selects the primal-weight restart rule:
 `0` = cuPDLPx PID (default), `1` = HPR-LP-style sigma update.

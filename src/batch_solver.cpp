@@ -134,6 +134,7 @@ struct BatchDriver {
         prep_params.bound_objective_rescaling = false;
         prep_params.verbose = false;
         prep_params.host_double_residual_evaluation = false;
+        prep_params.infeasibility_detection = true;
         prepared.reset(new MlxPdlpSolver(n, m, rp, ci, v, nullptr, nullptr, nullptr, nullptr,
                         nullptr, 0, &prep_params, nullptr, nullptr, nullptr, device, nullptr, true));
         mx::StreamContext context(prepared->s_.stream);
@@ -195,12 +196,13 @@ struct BatchDriver {
         const auto &schedule = (transpose ? row_schedules_at : row_schedules_a)[options.lp_tile_width == 4 ? 0 : 1];
         return schedule ? &*schedule : nullptr;
     }
-    mx::array product(const mx::array &v, const mx::array &active, bool transpose, const BatchOptions &options) {
+    mx::array product(const mx::array &v, const mx::array &active, bool transpose, const BatchOptions &options, bool absolute = false) {
         const int tile = options.lp_tile_width;
         auto &a = *prepared->matrix_;
         return metal_spmm(transpose ? a.sparse_at_row_ptr_ : a.sparse_a_row_ptr_,
                           transpose ? a.sparse_at_col_ind_ : a.sparse_a_col_ind_,
-                          transpose ? a.sparse_at_values_ : a.sparse_a_values_, v, active,
+                          absolute ? (transpose ? a.absolute_at_ : a.absolute_a_) :
+                                     (transpose ? a.sparse_at_values_ : a.sparse_a_values_), v, active,
                           transpose ? n : m, tile, reduction(transpose, tile), submission_stream,
                           row_schedule(transpose, options));
     }
@@ -238,7 +240,10 @@ struct BatchDriver {
         auto &s = solver.s_;
         mx::eval(s.delta_x, s.delta_y);
         std::vector<double> ray(primal ? n : m);
-        const auto &delta = primal ? s.delta_x : s.delta_y;
+        const auto &candidates = primal ? solver.primal_ray_candidates_ : solver.dual_ray_candidates_;
+        const auto &delta = candidates.empty() ? (primal ? s.delta_x : s.delta_y)
+            : candidates[primal ? solver.primal_ray_candidate_ : solver.dual_ray_candidate_];
+        mx::eval(delta);
         const auto &scale = primal ? prepared->matrix_->sparse_var_rescale_host_ : prepared->matrix_->sparse_con_rescale_host_;
         const double normalization = primal ? s.con_bound_rescale : s.obj_vec_rescale;
         double largest = 0;
@@ -256,7 +261,14 @@ struct BatchDriver {
             if (primal) product_values[row] += static_cast<long double>(a.original_matrix_values_[k])*ray[col];
             else product_values[col] += static_cast<long double>(a.original_matrix_values_[k])*ray[row];
         }
-        long double gap=0, violation=0;
+        auto absolute_values = detail::absolute_csr_values(a.original_row_ptr_, a.original_col_ind_, a.original_matrix_values_);
+        std::vector<long double> activity(primal ? m : n, 0);
+        for (int row = 0; row < m; ++row) for (int k = a.original_row_ptr_[row]; k < a.original_row_ptr_[row+1]; ++k) {
+            const int col = a.original_col_ind_[k];
+            if (primal) activity[row] += static_cast<long double>(absolute_values[k]) * std::abs(ray[col]);
+            else activity[col] += static_cast<long double>(absolute_values[k]) * std::abs(ray[row]);
+        }
+        long double gap=0, objective_abs=0, violation=0, original_violation=0, activity_max=0;
         auto recession = [](long double value, double lo, double hi) {
             long double v=0;
             if (std::isfinite(lo)) v=std::max(v,-value);
@@ -265,34 +277,57 @@ struct BatchDriver {
         };
         if (primal) {
             for (int i=0;i<n;++i) {
-                gap += static_cast<long double>(solver.original_objective_[i])*ray[i];
-                violation=std::max(violation,recession(ray[i],solver.original_variable_lower_bound_[i],solver.original_variable_upper_bound_[i]));
+                const long double term = static_cast<long double>(solver.original_objective_[i])*ray[i];
+                gap += term;
+                objective_abs += std::abs(term);
+                // Candidate projection must satisfy the variable cone exactly.
+                if (recession(ray[i],solver.original_variable_lower_bound_[i],solver.original_variable_upper_bound_[i]) > 0)
+                    return false;
             }
-            for (int i=0;i<m;++i)
-                violation=std::max(violation,recession(product_values[i],solver.original_constraint_lower_bound_[i],solver.original_constraint_upper_bound_[i]));
+            for (int i=0;i<m;++i) {
+                const double scale = a.sparse_con_rescale_host_[i];
+                const auto residual = recession(product_values[i],solver.original_constraint_lower_bound_[i],solver.original_constraint_upper_bound_[i]);
+                original_violation=std::max(original_violation,residual);
+                violation=std::max(violation,residual / scale);
+                activity_max=std::max(activity_max,activity[i] / scale);
+            }
             gap=-gap;
         } else {
             for (int i=0;i<m;++i) if (ray[i]!=0) {
                 const double bound=ray[i]>0?solver.original_constraint_lower_bound_[i]:solver.original_constraint_upper_bound_[i];
                 if (!std::isfinite(bound)) return false;
-                gap += static_cast<long double>(bound)*ray[i];
+                const long double term = static_cast<long double>(bound)*ray[i];
+                gap += term;
+                objective_abs += std::abs(term);
             }
             for (int i=0;i<n;++i) if (product_values[i]!=0) {
                 const double bound=product_values[i]>0?solver.original_variable_upper_bound_[i]:solver.original_variable_lower_bound_[i];
-                if (!std::isfinite(bound)) { violation=std::max(violation,std::abs(product_values[i])); continue; }
-                gap -= static_cast<long double>(bound)*product_values[i];
+                if (!std::isfinite(bound)) {
+                    original_violation=std::max(original_violation,std::abs(product_values[i]));
+                    violation=std::max(violation,std::abs(product_values[i]) / a.sparse_var_rescale_host_[i]);
+                    continue;
+                }
+                const long double term = static_cast<long double>(bound)*product_values[i];
+                gap -= term;
+                objective_abs += std::abs(term);
             }
         }
-        const double tolerance=solver.params_.termination_criteria.eps_infeasible_relative;
-        const double norm=primal?s.objective_vector_norm:s.constraint_bound_norm;
-        if (!std::isfinite(gap)||!std::isfinite(violation)||gap<=tolerance*(1+norm)||violation>tolerance*gap) return false;
+        if (!primal) for (int i = 0; i < n; ++i)
+            activity_max=std::max(activity_max,activity[i] / a.sparse_var_rescale_host_[i]);
+        const auto &tc = solver.params_.termination_criteria;
+        const double margin = s.cpu_double_precision_active ? tc.infeasible_ray_objective_margin
+            : std::max(1e-3, tc.infeasible_ray_objective_margin);
+        if (!std::isfinite(gap) || !std::isfinite(objective_abs) ||
+            !std::isfinite(violation) || !std::isfinite(activity_max) ||
+            gap <= 0 || gap < margin * objective_abs || violation > tc.eps_infeasible_relative * activity_max)
+            return false;
         if (primal) {
             member.primal_ray=std::move(ray);
-            s.primal_ray_linear_objective=-double(gap);s.max_primal_ray_infeasibility=double(violation);
+            s.primal_ray_linear_objective=-double(gap);s.max_primal_ray_infeasibility=double(original_violation);
             s.termination_reason=TERMINATION_REASON_DUAL_INFEASIBLE;
         } else {
             member.dual_ray=std::move(ray);
-            s.dual_ray_objective=double(gap);s.max_dual_ray_infeasibility=double(violation);
+            s.dual_ray_objective=double(gap);s.max_dual_ray_infeasibility=double(original_violation);
             s.termination_reason=TERMINATION_REASON_PRIMAL_INFEASIBLE;
         }
         return true;
@@ -406,12 +441,6 @@ struct BatchDriver {
             auto aty = product(w.yp, active_array, true, options);
             auto dx = w.xr - w.xp, dy = w.yr - w.yp;
             auto cross = product(dy, active_array, true, options);
-            auto ray = [&](const mx::array &v) {
-                auto norm = v.shape(0) == 0 ? mx::zeros({width}, mx::float32) : mx::max(mx::abs(v), 0);
-                return v / mx::where(norm > 0, norm, mx::ones_like(norm));
-            };
-            auto primal_ray_product = product(ray(dx), active_array, false, options);
-            auto dual_ray_product = product(ray(dy), active_array, true, options);
             auto fp = mx::stack({mx::sqrt(mx::sum(mx::square(dx), 0)), mx::sqrt(mx::sum(mx::square(dy), 0)),
                                  mx::sum(cross * dx, 0)});
             auto distances = mx::stack({mx::sqrt(mx::sum(mx::square(w.xp - w.xi), 0)),
@@ -427,11 +456,29 @@ struct BatchDriver {
                     evaluated.insert(evaluated.end(), {s.x_cur, s.x_ref, s.x_pdhg, s.dual_slack, s.y_cur, s.y_ref, s.y_pdhg});
                 }
                 metrics.push_back(solvers[j]->build_residual_metrics());
-                auto ar = lane(primal_ray_product, j), atr = lane(dual_ray_product, j);
-                ray_metrics.push_back(solvers[j]->build_infeasibility_metrics(&ar, &atr));
+                if (solvers[j]->params_.infeasibility_detection)
+                    solvers[j]->prepare_infeasibility_candidates();
+            }
+            if (solvers[0]->params_.infeasibility_detection) {
+                for (int c = 0; c < 3; ++c) {
+                    std::vector<mx::array> primal, dual;
+                    for (int j = 0; j < width; ++j) {
+                        primal.push_back(j < count ? solvers[j]->primal_ray_candidates_[c] : mx::zeros({n}, mx::float32));
+                        dual.push_back(j < count ? solvers[j]->dual_ray_candidates_[c] : mx::zeros({m}, mx::float32));
+                    }
+                    auto d = mx::stack(primal, 1), y = mx::stack(dual, 1);
+                    auto ad = product(d, active_array, false, options);
+                    auto aty_ray = product(y, active_array, true, options);
+                    auto abs_ad = product(mx::abs(d), active_array, false, options, true);
+                    auto abs_aty = product(mx::abs(y), active_array, true, options, true);
+                    for (int j = 0; j < count; ++j) {
+                        mx::array products[] = {lane(ad, j), lane(aty_ray, j), lane(abs_ad, j), lane(abs_aty, j)};
+                        ray_metrics.push_back(solvers[j]->build_infeasibility_metrics(c, products));
+                    }
+                }
             }
             auto packed_metrics = mx::contiguous(mx::stack(metrics));
-            auto packed_ray_metrics = mx::contiguous(mx::stack(ray_metrics));
+            auto packed_ray_metrics = ray_metrics.empty() ? mx::zeros({0}, mx::float32) : mx::contiguous(mx::stack(ray_metrics));
             evaluated.push_back(packed_metrics);
             evaluated.push_back(packed_ray_metrics);
             mx::eval(evaluated);
@@ -455,9 +502,13 @@ struct BatchDriver {
                     for (int a = 0; a < 6; ++a) member_metrics[a] = values[6*j+a];
                     solver.publish_residual_metrics(member_metrics);
                     solver.publish_fixed_point_metrics(fp_values[j], fp_values[width+j], fp_values[2*width+j]);
-                    for (int a = 0; a < 6; ++a) member_metrics[a] = ray_values[6*j+a];
-                    solver.publish_infeasibility_metrics(member_metrics);
-                    solver.infeasibility_metrics_ready_ = true;
+                    if (params.infeasibility_detection) {
+                        double candidate_metrics[18];
+                        for (int c = 0; c < 3; ++c) for (int a = 0; a < 6; ++a)
+                            candidate_metrics[6*c+a] = ray_values[6*(c*count+j)+a];
+                        solver.publish_infeasibility_metrics(candidate_metrics);
+                        solver.infeasibility_metrics_ready_ = true;
+                    }
                 }
                 if (solver.invalid_fixed_point_metric_ || !std::isfinite(s.relative_primal_residual) ||
                     !std::isfinite(s.relative_dual_residual) || !std::isfinite(s.relative_objective_gap)) {
@@ -474,7 +525,7 @@ struct BatchDriver {
                             ++output.results[begin+j].original_audit_failures;
                             s.termination_reason = TERMINATION_REASON_UNSPECIFIED;
                         }
-                    } else if ((n == 0 || m == 0) && s.termination_reason != TERMINATION_REASON_OPTIMAL) {
+                    } else if (params.infeasibility_detection && (n == 0 || m == 0) && s.termination_reason != TERMINATION_REASON_OPTIMAL) {
                         if (!audit_ray(solver, output.results[begin+j], false)) audit_ray(solver, output.results[begin+j], true);
                     }
                     if (s.termination_reason == TERMINATION_REASON_OPTIMAL) {
@@ -567,7 +618,7 @@ struct BatchDriver {
         // Includes packed bounds, live vectors, snapshots, detached member lanes,
         // bounded K graphs, host audit/correction work, and allocator headroom.
         const size_t lane_bytes = checked_mul(size_t(n) + m + 1,
-            size_t(768 + 48 * options.iteration_batch_size));
+            size_t(1024 + 48 * options.iteration_batch_size));
         size_t group_width = shared ? input.size() : 1;
         if (options.resident_memory_budget_bytes) {
             const size_t budget = options.resident_memory_budget_bytes;

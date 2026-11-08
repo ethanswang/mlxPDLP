@@ -241,6 +241,8 @@ void mlxpdlp_set_default_parameters(pdhg_parameters_t *p) {
     p->termination_criteria.eps_optimal_relative = 1e-4;
     p->termination_criteria.eps_feasible_relative = 1e-4;
     p->termination_criteria.eps_infeasible_relative = 1e-14;
+    p->termination_criteria.infeasible_ray_objective_margin = 1e-8;
+    p->infeasibility_detection = true;
     p->termination_criteria.time_sec_limit = 3600.0;
     p->termination_criteria.iteration_limit = INT32_MAX;
     // Feasibility polishing is an internal certificate-improvement phase. Its
@@ -1503,6 +1505,59 @@ mx::array MlxPdlpSolver::mat_ATx(const mx::array &y) {
     return mx::reshape(x_2d, {s_.n});
 }
 
+void MlxPdlpSolver::prepare_absolute_matrix() {
+    if (s_.sparse_metal_active || s_.sparse_cpu_active) {
+        auto values = matrix_->sparse_a_values_host_;
+        if (s_.sparse_metal_active)
+            for (auto &value : values) value = static_cast<float>(value);
+        auto absolute = detail::absolute_csr_values(matrix_->sparse_a_row_ptr_host_,
+                                                   matrix_->sparse_a_col_ind_host_, values);
+        if (s_.sparse_metal_active) {
+            std::vector<double> transposed(absolute.size());
+            for (size_t k = 0; k < absolute.size(); ++k)
+                transposed[k] = absolute[matrix_->sparse_at_source_index_[k]];
+            matrix_->absolute_a_ = mlx_array_from_doubles(absolute.data(), s_.nnz, mx::float32);
+            matrix_->absolute_at_ = mlx_array_from_doubles(transposed.data(), s_.nnz, mx::float32);
+        } else {
+#ifdef MLXPDLP_HAS_ACCELERATE_SPARSE
+            auto matrix = std::make_shared<detail::CpuSparseMatrix>(s_.m, s_.n);
+            matrix->assign_csr(s_.m, matrix_->sparse_a_row_ptr_host_.data(),
+                               matrix_->sparse_a_col_ind_host_.data(), absolute.data());
+            matrix_->sparse_cpu_absolute_matrix_ = std::move(matrix);
+#endif
+        }
+    } else {
+        matrix_->absolute_a_ = mx::abs(s_.A);
+        matrix_->absolute_at_ = mx::transpose(matrix_->absolute_a_);
+    }
+    mx::eval(matrix_->absolute_a_, matrix_->absolute_at_);
+}
+
+mx::array MlxPdlpSolver::mat_abs_product(const mx::array &v, bool transpose) {
+    const int rows = transpose ? s_.n : s_.m;
+    auto input = mx::abs(v);
+    if (s_.sparse_metal_active) {
+        return sparse_matvec(transpose ? matrix_->sparse_at_row_ptr_ : matrix_->sparse_a_row_ptr_,
+                             transpose ? matrix_->sparse_at_col_ind_ : matrix_->sparse_a_col_ind_,
+                             transpose ? matrix_->absolute_at_ : matrix_->absolute_a_,
+                             transpose ? matrix_->sparse_at_work_offsets_ : matrix_->sparse_a_work_offsets_,
+                             transpose ? matrix_->sparse_at_work_rows_ : matrix_->sparse_a_work_rows_,
+                             input, rows,
+                             transpose ? matrix_->sparse_at_work_item_count_ : matrix_->sparse_a_work_item_count_,
+                             transpose ? s_.sparse_at_spmv_strategy : s_.sparse_a_spmv_strategy);
+    }
+    if (s_.sparse_cpu_active) {
+#ifdef MLXPDLP_HAS_ACCELERATE_SPARSE
+        auto primitive = std::make_shared<CpuSparseMatvecPrimitive>(
+            s_.stream, matrix_->sparse_cpu_absolute_matrix_, transpose ? CblasTrans : CblasNoTrans, rows);
+        return mx::array(mx::Shape{rows}, mx::float64, std::move(primitive),
+                         std::vector<mx::array>{mx::contiguous(input, false, s_.stream)});
+#endif
+    }
+    return mx::reshape(mx::matmul(transpose ? matrix_->absolute_at_ : matrix_->absolute_a_,
+                                  mx::reshape(input, {transpose ? s_.m : s_.n, 1})), {rows});
+}
+
 // ---------------------------------------------------------------------------
 // Scalar reductions
 // ---------------------------------------------------------------------------
@@ -2389,6 +2444,15 @@ void MlxPdlpSolver::mlx_compute_next_dual(int k_offset, bool is_major,
 }
 
 void MlxPdlpSolver::mlx_compute_fixed_point_error() {
+    auto metrics = build_fixed_point_metrics();
+    mx::eval(metrics);
+    const auto value = [&](int i) {
+        return metrics.dtype() == mx::float64 ? metrics.data<double>()[i] : metrics.data<float>()[i];
+    };
+    publish_fixed_point_metrics(value(0), value(1), value(2));
+}
+
+mx::array MlxPdlpSolver::build_fixed_point_metrics() {
     // CUDA reference: delta = reflected - pdhg (NOT pdhg - initial)
     // delta_x = x_ref - x_pdhg
     s_.delta_x = s_.x_ref - s_.x_pdhg;
@@ -2402,12 +2466,20 @@ void MlxPdlpSolver::mlx_compute_fixed_point_error() {
     // Compute A^T * delta_y
     auto AT_delta_y = mat_ATx(s_.delta_y);
     auto cross_term_value = mx::sum(AT_delta_y * s_.delta_x);
-    mx::eval(primal_norm_value, dual_norm_value, cross_term_value);
-    const double primal_norm = mlx_scalar_as_double(primal_norm_value);
-    const double dual_norm = mlx_scalar_as_double(dual_norm_value);
-    const double cross_term = mlx_scalar_as_double(cross_term_value);
+    return mx::stack({primal_norm_value, dual_norm_value, cross_term_value});
+}
 
-    publish_fixed_point_metrics(primal_norm, dual_norm, cross_term);
+void MlxPdlpSolver::mlx_compute_checkpoint() {
+    auto fixed_point = build_fixed_point_metrics();
+    s_.Ax = mat_Ax(s_.x_pdhg);
+    s_.ATy = mat_ATx(s_.y_pdhg);
+    auto metrics = mx::concatenate({fixed_point, build_residual_metrics()});
+    mx::eval(metrics);
+    double values[9];
+    for (int i = 0; i < 9; ++i)
+        values[i] = metrics.dtype() == mx::float64 ? metrics.data<double>()[i] : metrics.data<float>()[i];
+    publish_fixed_point_metrics(values[0], values[1], values[2]);
+    publish_residual_metrics(values + 3);
 }
 
 void MlxPdlpSolver::publish_fixed_point_metrics(double primal_norm, double dual_norm,
@@ -3159,113 +3231,112 @@ void MlxPdlpSolver::mlx_dual_feasibility_polish() {
     s_.feasibility_polishing_time_sec += elapsed_seconds(polish_start);
 }
 
+void MlxPdlpSolver::prepare_infeasibility_candidates() {
+    infeasibility_metrics_ready_ = false;
+    primal_ray_candidates_ = {s_.delta_x, s_.x_pdhg, s_.x_pdhg - s_.x_init};
+    dual_ray_candidates_ = {s_.delta_y, s_.y_pdhg, s_.y_pdhg - s_.y_init};
+    auto normalize = [](const mx::array &v) {
+        if (v.size() == 0) return v;
+        auto norm = mx::max(mx::abs(v));
+        return v / mx::where(norm > 0, norm, mx::ones_like(norm));
+    };
+    for (int c = 0; c < 3; ++c) {
+        auto &d = primal_ray_candidates_[c];
+        d = mx::where(s_.var_lb_inf_mask, d, mx::maximum(d, mx::zeros_like(d)));
+        d = mx::where(s_.var_ub_inf_mask, d, mx::minimum(d, mx::zeros_like(d)));
+        d = normalize(d);
+        auto &y = dual_ray_candidates_[c];
+        y = mx::where(s_.con_lb_inf_mask, mx::minimum(y, mx::zeros_like(y)), y);
+        y = mx::where(s_.con_ub_inf_mask, mx::maximum(y, mx::zeros_like(y)), y);
+        y = normalize(y);
+    }
+}
+
 void MlxPdlpSolver::mlx_compute_infeasibility_information() {
     ++s_.infeasibility_check_count;
     if (infeasibility_metrics_ready_) {
         infeasibility_metrics_ready_ = false;
         return;
     }
-    auto metrics = build_infeasibility_metrics();
+    prepare_infeasibility_candidates();
+    auto metrics = mx::contiguous(mx::stack({build_infeasibility_metrics(0),
+                                           build_infeasibility_metrics(1),
+                                           build_infeasibility_metrics(2)}));
     mx::eval(metrics);
-    double values[6];
-    for (int i=0;i<6;++i)
+    double values[18];
+    for (int i = 0; i < 18; ++i)
         values[i] = metrics.dtype() == mx::float64 ? metrics.data<double>()[i] : metrics.data<float>()[i];
     publish_infeasibility_metrics(values);
 }
 
-mx::array MlxPdlpSolver::build_infeasibility_metrics(const mx::array *primal_product,
-                                                   const mx::array *dual_product) {
-    if (s_.m == 0 || s_.n == 0) return mx::zeros({6}, s_.obj.dtype());
-    // Infeasibility certificates via Farkas separation on the box-constrained
-    // formulation, computed on the sign-projected fixed-point deltas. The
-    // residual measures recession-cone membership, and the objective is the
-    // full separation gap, so the certificate is valid (and silent) on
-    // feasible problems even when every bound mask is vacuous.
-    //
-    // Primal ray r (dual-infeasibility certificate): r must lie in the
-    // recession cone of the variable box and A r in the recession cone of the
-    // constraint box, with c^T r < 0. For a box [l, u] the recession cone is
-    //   r_j >= 0 if (u_j = +inf and l_j > -inf),
-    //   r_j <= 0 if (l_j = -inf and u_j < +inf),
-    //   r_j  = 0 if both bounds are finite, free if both are infinite.
-    auto primal_ray_inf_norm_value = mx::max(mx::abs(s_.delta_x));
-    auto primal_ray_denominator =
-        mx::where(primal_ray_inf_norm_value > 0.0, primal_ray_inf_norm_value,
-                  mx::ones_like(primal_ray_inf_norm_value));
-    auto primal_ray = s_.delta_x / primal_ray_denominator;
-    auto A_pr = primal_product ? *primal_product : mat_Ax(primal_ray);
-    auto primal_ray_objective_value = mx::sum(s_.obj * primal_ray);
-
-    auto var_upper_only = s_.var_ub_inf_mask * (1.0 - s_.var_lb_inf_mask);
-    auto var_lower_only = s_.var_lb_inf_mask * (1.0 - s_.var_ub_inf_mask);
-    auto var_both_finite = (1.0 - s_.var_lb_inf_mask) * (1.0 - s_.var_ub_inf_mask);
-    auto r_var_viol =
-        mx::maximum(-primal_ray, mx::zeros_like(primal_ray)) * var_upper_only +
-        mx::maximum(primal_ray, mx::zeros_like(primal_ray)) * var_lower_only +
-        mx::abs(primal_ray) * var_both_finite;
-    auto con_upper_only = s_.con_ub_inf_mask * (1.0 - s_.con_lb_inf_mask);
-    auto con_lower_only = s_.con_lb_inf_mask * (1.0 - s_.con_ub_inf_mask);
-    auto con_both_finite = (1.0 - s_.con_lb_inf_mask) * (1.0 - s_.con_ub_inf_mask);
-    auto r_con_viol =
-        mx::maximum(-A_pr, mx::zeros_like(A_pr)) * con_upper_only +
-        mx::maximum(A_pr, mx::zeros_like(A_pr)) * con_lower_only +
-        mx::abs(A_pr) * con_both_finite;
-    auto r_var_viol_norm_value = mx::max(mx::abs(r_var_viol));
-    auto r_con_viol_norm_value = mx::max(mx::abs(r_con_viol));
-
-    // Dual ray y (primal-infeasibility certificate): the separation gap
-    //   min_s y^T s - max_x (A^T y)^T x
-    // over the constraint box s and variable box x must be strictly positive.
-    // Finiteness of min_s requires y_i > 0 only where con_lb_i is finite and
-    // y_i < 0 only where con_ub_i is finite; finiteness of max_x requires
-    // (A^T y)_j > 0 only where var_ub_j is finite and < 0 only where
-    // var_lb_j is finite. Feasible problems satisfy the gap <= 0 for every y
-    // by weak duality, so this test cannot fire on them in exact arithmetic.
-    auto dual_ray_inf_norm_value = mx::max(mx::abs(s_.delta_y));
-    auto dual_ray_denominator =
-        mx::where(dual_ray_inf_norm_value > 0.0, dual_ray_inf_norm_value,
-                  mx::ones_like(dual_ray_inf_norm_value));
-    auto dual_ray = s_.delta_y / dual_ray_denominator;
-    auto AT_dr = dual_product ? *dual_product : mat_ATx(dual_ray);
-
-    auto y_con_viol = mx::maximum(dual_ray, mx::zeros_like(dual_ray)) * s_.con_lb_inf_mask +
-                      mx::maximum(-dual_ray, mx::zeros_like(dual_ray)) * s_.con_ub_inf_mask;
-    auto y_var_viol = mx::maximum(AT_dr, mx::zeros_like(AT_dr)) * s_.var_ub_inf_mask +
-                      mx::maximum(-AT_dr, mx::zeros_like(AT_dr)) * s_.var_lb_inf_mask;
-    auto y_con_viol_norm_value = mx::max(mx::abs(y_con_viol));
-    auto y_var_viol_norm_value = mx::max(mx::abs(y_var_viol));
-
-    // Finite-safe bound values must be derived from the CURRENT scaled bounds:
-    // the cached finite-safe arrays are only refreshed after Ruiz and go stale
-    // after Pock-Chambolle and bound/objective scaling. Geometric-mean scaling
-    // runs before that refresh.
-    auto con_lb_safe = mx::where(mx::isfinite(s_.con_lb), s_.con_lb, mx::zeros_like(s_.con_lb));
-    auto con_ub_safe = mx::where(mx::isfinite(s_.con_ub), s_.con_ub, mx::zeros_like(s_.con_ub));
-    auto var_lb_safe = mx::where(mx::isfinite(s_.var_lb), s_.var_lb, mx::zeros_like(s_.var_lb));
-    auto var_ub_safe = mx::where(mx::isfinite(s_.var_ub), s_.var_ub, mx::zeros_like(s_.var_ub));
-    auto min_s = mx::maximum(dual_ray, mx::zeros_like(dual_ray)) * con_lb_safe +
-                 mx::minimum(dual_ray, mx::zeros_like(dual_ray)) * con_ub_safe;
-    auto max_x = mx::maximum(AT_dr, mx::zeros_like(AT_dr)) * var_ub_safe +
-                 mx::minimum(AT_dr, mx::zeros_like(AT_dr)) * var_lb_safe;
-    auto dual_ray_objective_value = mx::sum(min_s) - mx::sum(max_x);
-
-    return mx::stack({primal_ray_objective_value, r_var_viol_norm_value, r_con_viol_norm_value, y_con_viol_norm_value, y_var_viol_norm_value, dual_ray_objective_value});
+mx::array MlxPdlpSolver::build_infeasibility_metrics(int candidate, const mx::array *products) {
+    const auto &d = primal_ray_candidates_[candidate];
+    const auto &y = dual_ray_candidates_[candidate];
+    auto maximum = [&](const mx::array &v) {
+        return v.size() ? mx::max(v) : mx::array(0.0, s_.obj.dtype());
+    };
+    auto Ad = products ? products[0] : mat_Ax(d);
+    auto ATy = products ? products[1] : mat_ATx(y);
+    auto abs_Ad = products ? products[2] : mat_abs_product(d, false);
+    auto abs_ATy = products ? products[3] : mat_abs_product(y, true);
+    auto primal_violation = mx::maximum(
+        mx::maximum(-Ad, mx::zeros_like(Ad)) * (1.0 - s_.con_lb_inf_mask),
+        mx::maximum(Ad, mx::zeros_like(Ad)) * (1.0 - s_.con_ub_inf_mask));
+    auto dual_violation = mx::maximum(
+        mx::maximum(ATy, mx::zeros_like(ATy)) * s_.var_ub_inf_mask,
+        mx::maximum(-ATy, mx::zeros_like(ATy)) * s_.var_lb_inf_mask);
+    auto primal_terms = s_.obj * d;
+    auto primal_objective = mx::sum(primal_terms);
+    auto con_lb = mx::where(mx::isfinite(s_.con_lb), s_.con_lb, mx::zeros_like(s_.con_lb));
+    auto con_ub = mx::where(mx::isfinite(s_.con_ub), s_.con_ub, mx::zeros_like(s_.con_ub));
+    auto var_lb = mx::where(mx::isfinite(s_.var_lb), s_.var_lb, mx::zeros_like(s_.var_lb));
+    auto var_ub = mx::where(mx::isfinite(s_.var_ub), s_.var_ub, mx::zeros_like(s_.var_ub));
+    auto constraint_terms = mx::where(y > 0, con_lb, con_ub) * y;
+    auto variable_terms = mx::where(ATy > 0, var_ub, var_lb) * ATy;
+    auto dual_objective = mx::sum(constraint_terms) - mx::sum(variable_terms);
+    const double margin = s_.cpu_double_precision_active
+        ? params_.termination_criteria.infeasible_ray_objective_margin
+        : std::max(1e-3, params_.termination_criteria.infeasible_ray_objective_margin);
+    auto error = [&](const mx::array &violation, const mx::array &activity,
+                     const mx::array &gap, const mx::array &absolute_objective) {
+        auto residual = maximum(violation), denominator = maximum(activity);
+        auto infinity = mx::array(inf(), s_.obj.dtype());
+        auto ratio = mx::where(denominator > 0, residual / denominator,
+                               mx::where(residual > 0, infinity, mx::zeros_like(residual)));
+        auto admissible = mx::logical_and(gap > 0,
+            gap >= mlx_scalar_like(margin, gap) * absolute_objective);
+        admissible = mx::logical_and(admissible, mx::isfinite(gap));
+        admissible = mx::logical_and(admissible, mx::isfinite(absolute_objective));
+        admissible = mx::logical_and(admissible, mx::isfinite(denominator));
+        admissible = mx::logical_and(admissible, mx::isfinite(residual));
+        return mx::where(admissible, ratio, infinity);
+    };
+    auto primal_error = error(primal_violation, abs_Ad, -primal_objective, mx::sum(mx::abs(primal_terms)));
+    auto dual_error = error(dual_violation, abs_ATy, dual_objective,
+                            mx::sum(mx::abs(constraint_terms)) + mx::sum(mx::abs(variable_terms)));
+    auto primal_norm = maximum(mx::abs(d) / s_.var_rescale);
+    auto dual_norm = maximum(mx::abs(y) / s_.con_rescale);
+    primal_norm = mx::where(primal_norm > 0, primal_norm, mx::ones_like(primal_norm));
+    dual_norm = mx::where(dual_norm > 0, dual_norm, mx::ones_like(dual_norm));
+    auto primal_obj_original = primal_objective / mlx_scalar_like(s_.obj_vec_rescale, primal_objective) / primal_norm;
+    auto dual_obj_original = dual_objective / mlx_scalar_like(s_.con_bound_rescale, dual_objective) / dual_norm;
+    return mx::stack({primal_obj_original, maximum(primal_violation * s_.con_rescale) / primal_norm,
+                      primal_error, dual_obj_original, maximum(dual_violation * s_.var_rescale) / dual_norm,
+                      dual_error});
 }
 
 void MlxPdlpSolver::publish_infeasibility_metrics(const double *values) {
-    working_primal_ray_objective_ =
-        values[0];
-    s_.primal_ray_linear_objective =
-        working_primal_ray_objective_ / (s_.con_bound_rescale * s_.obj_vec_rescale);
-    s_.max_primal_ray_infeasibility =
-        std::max(values[1],
-                 values[2]);
-    s_.max_dual_ray_infeasibility =
-        std::max(values[3],
-                 values[4]);
-    working_dual_ray_objective_ = values[5];
-    s_.dual_ray_objective =
-        working_dual_ray_objective_ / (s_.con_bound_rescale * s_.obj_vec_rescale);
+    primal_ray_candidate_ = dual_ray_candidate_ = 0;
+    for (int c = 1; c < 3; ++c) {
+        if (values[6*c+2] < values[6*primal_ray_candidate_+2]) primal_ray_candidate_ = c;
+        if (values[6*c+5] < values[6*dual_ray_candidate_+5]) dual_ray_candidate_ = c;
+    }
+    s_.primal_ray_linear_objective = values[6*primal_ray_candidate_];
+    s_.max_primal_ray_infeasibility = values[6*primal_ray_candidate_+1];
+    primal_ray_certificate_error_ = values[6*primal_ray_candidate_+2];
+    s_.dual_ray_objective = values[6*dual_ray_candidate_+3];
+    s_.max_dual_ray_infeasibility = values[6*dual_ray_candidate_+4];
+    dual_ray_certificate_error_ = values[6*dual_ray_candidate_+5];
 }
 
 // ---------------------------------------------------------------------------
@@ -3364,23 +3435,10 @@ bool MlxPdlpSolver::mlx_check_termination(bool full_evaluation) {
         return true;
     }
 
-    // ---- Infeasibility certification ----
-    // Farkas separation certificates (see mlx_compute_infeasibility_information).
-    // A dual ray with a strictly positive separation gap certifies primal
-    // infeasibility; a primal ray with a negative linear objective certifies
-    // dual infeasibility (an unbounded primal). The gap must be significant
-    // relative to the problem data, and the recession-cone residual small
-    // relative to the gap. On feasible problems the dual-ray gap is <= 0 for
-    // every y by weak duality, so only fp noise could trip it, and the
-    // significance floor absorbs that noise. Honor the independent requested
-    // residual ratio on both devices: silently relaxing it on Metal can turn
-    // an approximate ray into a false infeasibility status. Keep a separate
-    // FP32 gap floor, since even an exactly zero computed ray residual cannot
-    // validate a separation gap at the level of roundoff.
+    // Activity-normalized certificates and a separate objective margin avoid
+    // accepting a violated ray merely because its objective is very large.
     const double infeas_tol = tc.eps_infeasible_relative;
-    const double gap_tol =
-        s_.cpu_double_precision_active ? infeas_tol : std::max(infeas_tol, 1e-3);
-    // Sparse Metal certificate checks carry two additional SpMVs. Check the
+    // Sparse Metal certificates require additional matrix products. Check the
     // first block so easy certificates still terminate immediately, then at a
     // bounded iteration cadence. A limit block is always checked to preserve
     // certificate precedence over iteration/time-limit statuses. CPU and
@@ -3398,21 +3456,13 @@ bool MlxPdlpSolver::mlx_check_termination(bool full_evaluation) {
          (!s_.sparse_metal_active || evaluation_block <= 1 ||
           evaluation_block % blocks_per_infeasibility_check == 0)) ||
         iteration_limit_reached || time_limit_reached;
-    if (should_check_infeasibility) {
+    if (params_.infeasibility_detection && should_check_infeasibility) {
         mlx_compute_infeasibility_information();
-        // Significance floors use the original-unit gaps; the residual ratio
-        // tests use the working-unit gaps so both sides share units.
-        if (s_.dual_ray_objective >
-                gap_tol * (1.0 + s_.constraint_bound_norm) &&
-            s_.max_dual_ray_infeasibility <=
-                infeas_tol * working_dual_ray_objective_) {
+        if (dual_ray_certificate_error_ <= infeas_tol) {
             s_.termination_reason = TERMINATION_REASON_PRIMAL_INFEASIBLE;
             return true;
         }
-        if (s_.primal_ray_linear_objective <
-                -gap_tol * (1.0 + s_.objective_vector_norm) &&
-            s_.max_primal_ray_infeasibility <=
-                -infeas_tol * working_primal_ray_objective_) {
+        if (primal_ray_certificate_error_ <= infeas_tol) {
             s_.termination_reason = TERMINATION_REASON_DUAL_INFEASIBLE;
             return true;
         }
@@ -4352,6 +4402,8 @@ void MlxPdlpSolver::initialize_solve() {
     // power method and iterative PDHG hot path.
     prepare_sparse_metal_backend();
     prepare_sparse_cpu_backend();
+    if (!prepared_matrix_ && params_.infeasibility_detection)
+        prepare_absolute_matrix();
 
     // After all rescaling, copy initial solutions
     s_.x_init = s_.x_cur;
@@ -4593,8 +4645,7 @@ mlxpdlp_result_t *MlxPdlpSolver::solve() {
         }
 
         // --- Periodic checks ---
-        mlx_compute_fixed_point_error();
-        mlx_compute_residual();
+        mlx_compute_checkpoint();
 
         s_.inner_count += block_iterations;
         s_.total_count += block_iterations;

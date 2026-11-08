@@ -358,6 +358,12 @@ if(BUILD_TESTING)
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_batch_lp_trace.py")
         set_tests_properties(batch_lp_trace PROPERTIES
             LABELS "batch;qualification" TIMEOUT 30)
+        if(MLXPDLP_BUILD_PRESOLVE AND TARGET mlxpdlp_lpfeas_benchmark)
+            add_test(NAME benchmark_presolve_cpu
+                COMMAND "${Python3_EXECUTABLE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_benchmark_presolve.py"
+                        "$<TARGET_FILE:mlxpdlp_lpfeas_benchmark>")
+        endif()
     endif()
 
     add_executable(mlxpdlp_mlx_basic_test tests/test_mlx_basic.cpp)
@@ -379,6 +385,16 @@ if(BUILD_TESTING)
 
     add_test(NAME mlx_basic COMMAND mlxpdlp_mlx_basic_test)
     add_test(NAME solver COMMAND mlxpdlp_solver_test)
+    add_executable(mlxpdlp_infeasibility_test tests/test_infeasibility.cpp)
+    target_include_directories(mlxpdlp_infeasibility_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(mlxpdlp_infeasibility_test PRIVATE mlxPDLP::solver)
+    mlxpdlp_enable_warnings(mlxpdlp_infeasibility_test)
+    if(MLXPDLP_BUILD_PRESOLVE)
+        target_compile_definitions(mlxpdlp_infeasibility_test PRIVATE MLXPDLP_TEST_HAS_PRESOLVE=1)
+    endif()
+    add_test(NAME infeasibility_cpu COMMAND mlxpdlp_infeasibility_test cpu)
+    add_test(NAME infeasibility_metal COMMAND mlxpdlp_infeasibility_test metal)
+    set_tests_properties(infeasibility_metal PROPERTIES SKIP_RETURN_CODE 77)
     add_executable(mlxpdlp_parameter_validation_test tests/test_parameter_validation.cpp)
     target_link_libraries(mlxpdlp_parameter_validation_test PRIVATE mlxPDLP::solver)
     mlxpdlp_enable_warnings(mlxpdlp_parameter_validation_test)

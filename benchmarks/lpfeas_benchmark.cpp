@@ -1005,8 +1005,10 @@ RunRecord run_attempt(const ManifestEntry &entry, const fs::path &instance_path,
     if (solver.state().stream.device != device)
         throw std::runtime_error("solver did not retain the requested device");
     const bool expect_cpu_double = options.device == DeviceSelection::cpu;
-    if (solver.state().cpu_double_precision_active != expect_cpu_double ||
-        solver.state().obj.dtype() != (expect_cpu_double ? mx::float64 : mx::float32)) {
+    // Presolve can finish before backend arrays or arithmetic are initialized.
+    if (solver.state().obj.size() != 0 &&
+        (solver.state().cpu_double_precision_active != expect_cpu_double ||
+         solver.state().obj.dtype() != (expect_cpu_double ? mx::float64 : mx::float32))) {
         throw std::runtime_error("solver arithmetic precision does not match the requested device");
     }
     mx::synchronize(solver.state().stream);

@@ -181,6 +181,9 @@ static void test_default_parameters() {
     CHECK(params.termination_criteria.eps_feasible_relative == 1e-4, "wrong eps_feas");
     CHECK(params.termination_criteria.eps_infeasible_relative == 1e-14,
           "wrong eps_infeasible");
+    CHECK(params.infeasibility_detection, "infeasibility detection should default on");
+    CHECK(params.termination_criteria.infeasible_ray_objective_margin == 1e-8,
+          "wrong ray objective margin");
     CHECK(params.termination_criteria.eps_feas_polish_relative == 1e-6,
           "wrong eps_feas_polish");
     CHECK(!params.presolve_primal_propagation,

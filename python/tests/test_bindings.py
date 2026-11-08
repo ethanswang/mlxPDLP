@@ -54,6 +54,12 @@ def test_parameters_defaults_and_roundtrip():
     assert p.metal_iteration_batching is False
     assert p.termination_criteria.eps_infeasible_relative == 1e-14
     assert mlxpdlp.TerminationCriteria().eps_infeasible_relative == 1e-14
+    assert p.infeasibility_detection is True
+    assert p.termination_criteria.infeasible_ray_objective_margin == 1e-8
+    p.infeasibility_detection = False
+    p.termination_criteria.infeasible_ray_objective_margin = 1e-5
+    assert not p.infeasibility_detection
+    assert p.termination_criteria.infeasible_ray_objective_margin == 1e-5
     p.termination_criteria.eps_infeasible_relative = 1e-6
     assert p.geometric_mean_iterations == 12
     p.geometric_mean_iterations = 3

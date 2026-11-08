@@ -43,6 +43,8 @@ void validate_parameters(const pdhg_parameters_t &p) {
     finite_nonnegative(t.eps_feasible_relative, "termination_criteria.eps_feasible_relative");
     finite_nonnegative(t.eps_feas_polish_relative, "termination_criteria.eps_feas_polish_relative");
     finite_positive(t.eps_infeasible_relative, "termination_criteria.eps_infeasible_relative");
+    finite_nonnegative(t.infeasible_ray_objective_margin,
+                       "termination_criteria.infeasible_ray_objective_margin");
     nonnegative(t.iteration_limit, "termination_criteria.iteration_limit");
     time_budget(t.time_sec_limit, "termination_criteria.time_sec_limit");
 

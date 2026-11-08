@@ -97,6 +97,12 @@ FP64 primal/bound feasibility, dual feasibility/signs and objective gap must pas
 before returning `OPTIMAL`. Failed audits resume or use the selected bounded
 correction. Original-model ray audits precede shared-path infeasibility statuses;
 their owned vectors are exposed as `primal_ray` or `dual_ray` (empty otherwise).
+Each side chooses among the projected fixed-point delta, PDHG iterate, and
+displacement from the restart anchor. The original-model audit uses that same
+selected ray and checks activity-normalized residuals and the objective margin.
+The plan shares absolute matrix values across members and includes them in
+`resident_bytes`; temporary candidate vectors are included in the workspace
+budget. `infeasibility_detection=False` disables PDHG ray checks for a submission.
 
 Shared kernels pack vectors as `[component,B_padded]`, with LP tile width 4 or 8.
 Row-aware scheduling is a separate opt-in, disabled by default. Pass

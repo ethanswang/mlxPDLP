@@ -96,6 +96,11 @@ ray-certificate residual ratio on both devices and is not changed by
 `params.tolerance`. The strict default favors avoiding false infeasibility
 statuses; a value such as `1e-6` admits less accurate rays. Metal retains a
 separate guard against separation gaps near its arithmetic floor.
+The residual uses activity in the rescaled matrix as its denominator.
+`params.termination_criteria.infeasible_ray_objective_margin` defaults to
+`1e-8`, with a `1e-3` floor on Metal, and rejects cancellation in the ray
+objective. `params.infeasibility_detection = False` disables PDHG ray checks
+without disabling presolve.
 
 Warm starts use the original, unscaled problem coordinates and require
 `params.presolve = False`:

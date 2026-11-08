@@ -977,9 +977,10 @@ abs(relative_objective_gap) < eps_optimal_relative
 
 ### Infeasibility certification
 
-`mlx_compute_infeasibility_information()` builds Farkas separation
-certificates from the sign-constrained fixed-point deltas, normalized to
-unit inf-norm:
+`mlx_compute_infeasibility_information()` follows cuPDLPx #112 and tests
+three directions: the fixed-point delta, the current PDHG iterate, and the
+PDHG iterate minus its restart anchor. Candidates are projected onto the
+appropriate bound cones and normalized to unit inf-norm:
 
 - A **primal ray** r (dual-infeasibility certificate) must lie in the
   recession cone of the variable box with A r in the recession cone of the
@@ -992,24 +993,32 @@ unit inf-norm:
   every y by weak duality, so this test cannot fire on them in exact
   arithmetic.
 
-Termination fires when the certificate gap is significant relative to the
-original problem data and the recession-cone residual is small relative to
-the gap, with residual ratios compared in consistent working units. The
-ratio uses the independent `eps_infeasible_relative` parameter, default
-`1e-14`, on both CPU and Metal. It must be finite and positive. The
-original-unit gap must exceed `gap_tol * (1 + data_norm)`, where `gap_tol`
-is the requested certificate tolerance on CPU and at least `1e-3` on Metal.
-This separate FP32 significance guard does not relax the requested residual
-ratio. Increasing the certificate tolerance can recognize more approximate
-rays, at the risk of false infeasibility statuses on nearly infeasible models.
+The recession-cone violation is divided by `max(|A| |d|)` for a primal ray
+or `max(|A^T| |y|)` for a dual ray, using the rescaled matrix. This keeps
+objective magnitude out of the residual test. A zero activity certifies only
+a zero violation. Duplicate CSR entries are combined before taking absolute
+values, so cancellation does not inflate the activity denominator.
+The independent `eps_infeasible_relative` parameter remains finite and positive,
+defaulting to `1e-14` on CPU and Metal; the upstream FP64 `1e-8` default is not
+adopted. A separate `infeasible_ray_objective_margin` requires the signed gap
+to exceed a fraction of the sum of absolute objective terms. Its default is
+`1e-8`; Metal uses at least `1e-3` to reject FP32 cancellation. The best
+admissible candidate is selected independently for each side. Public ray
+statistics are normalized in original units.
+`infeasibility_detection=false` disables these PDHG checks without disabling
+PSLP presolve. Increasing the residual tolerance can recognize more approximate
+rays, with a risk of false statuses on nearly infeasible models.
 CPU and dense execution check certificates every evaluation block.
 Sparse Metal checks the first block, then at a block boundary approximately
 every 1,000 iterations, and always on iteration/time-limit blocks; easy
 certificates therefore retain first-block termination while routine blocks
-avoid two extra SpMVs. Both rays and all six certificate reductions share one
-lazy evaluation and one host synchronization. cuPDLPx now also enables its
-ray termination criteria with a separate `1e-14` default (#106); HPR-LP-C
-relies on PSLP presolve for infeasibility proofs.
+avoid the extra signed and absolute matrix products. All three candidates and
+their reductions share one lazy evaluation and one host synchronization.
+Shared batches use SpMM for these products and audit the selected ray on the
+original model before exporting it. Absolute matrix storage is shared and
+included in the batch memory budget. Separately, the single-LP fixed-point
+and optimality metrics now share one evaluation at each checkpoint; an optimal
+checkpoint still skips the more expensive ray search.
 
 Timing uses `std::chrono::steady_clock` and is stored in
 `cumulative_time_sec`.
